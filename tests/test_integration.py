@@ -1,13 +1,12 @@
 import pytest
 import torch
-from torch import nn
 from transformers import (GPTNeoXConfig, GPTNeoXForCausalLM,
                           GPTNeoXForSequenceClassification,
                           Qwen3Config, Qwen3ForSequenceClassification)
 from vpo_rm import (LastTokenReward, reward_input_gradients, check_tokenizers,
                     actor_response_logits, response_reward_gradients,
                     group_advantages, build_credit_cache, actor_policy_loss,
-                    gather_response, MeanStepReward)
+                    gather_response)
 
 
 def neox_config():
@@ -77,29 +76,6 @@ def test_full_rollout_cache_and_actor_update():
     assert all(p.grad is None for p in scorer.parameters())
     with pytest.raises(ValueError, match='IDs or valid positions'):
         response_reward_gradients(scorer, rids, rmask, positions-1, tokens, valid)
-
-
-def test_prm_marker_reduction():
-    from types import SimpleNamespace
-    class PRM(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.embed = nn.Embedding(9, 4)
-            self.head = nn.Linear(4, 2)
-        def get_input_embeddings(self):
-            return self.embed
-        def forward(self, *, inputs_embeds, **kwargs):
-            return SimpleNamespace(logits=self.head(inputs_embeds.cumsum(1)))
-    scorer = MeanStepReward(PRM())
-    ids = torch.tensor([[1,2,3,4]])
-    mask = torch.ones_like(ids)
-    steps = torch.tensor([[0,1,0,1]])
-    r, f = reward_input_gradients(scorer, ids, mask, step_mask=steps)
-    with torch.no_grad():
-        expected = scorer.token_model(inputs_embeds=scorer.get_input_embeddings()(ids)).logits
-        expected = expected.softmax(-1)[0, [1,3], 1].mean()
-    torch.testing.assert_close(r[0], expected)
-    assert f[0,0].abs().sum() > 0
 
 
 def test_token_id_identity():

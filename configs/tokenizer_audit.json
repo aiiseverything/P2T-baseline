@@ -1,108 +1,44 @@
 {
   "checked_on": "2026-09-08",
-  "scope": "Public tokenizer/config metadata; model weights were not downloaded",
+  "scope": "Actual tokenizer objects loaded from previously downloaded public metadata; model weights not loaded",
+  "pad_token": "<|endoftext|>",
+  "pad_token_id": 151643,
   "artifacts": [
     {
-      "filename": "Qwen__Qwen2.5-Math-7B-Instruct__config.json",
-      "sha256": "3a6dd7a4b3e6dd81c05ec943d837166508ceb953e1ce2baa57c84611d4765ef0"
+      "model": "Qwen/Qwen3-14B",
+      "sha256": {
+        "config.json": "e73c3664ca09b10a673fef0c22e8a6b456201d49bd4713c9691f775720e8857a",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+      }
     },
     {
-      "filename": "Qwen__Qwen2.5-Math-7B-Instruct__tokenizer.json",
-      "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+      "model": "project-themis/Themis-RM-14B",
+      "sha256": {
+        "config.json": "03016d253e44ba1f6bab9e8865f6b3bb1ef187446ad1d3e1c7958d0a662465e1",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "46269f48cc5690d09b17e98a5ee702ec9f2ca9b3744b9b920c1026a002afb29a"
+      }
     },
     {
-      "filename": "Qwen__Qwen2.5-Math-7B-Instruct__tokenizer_config.json",
-      "sha256": "d743761ff02297cc5cdf38a612b0f78d5cdf5ceb3f251ab1d25ad353d24b1887"
-    },
-    {
-      "filename": "Qwen__Qwen2.5-Math-PRM-7B__config.json",
-      "sha256": "70d5ef2f21af53e6c95252d8838f4898fbac6c83708a67c9c7c3f83f75318bbe"
-    },
-    {
-      "filename": "Qwen__Qwen2.5-Math-PRM-7B__tokenizer.json",
-      "sha256": "b145a1b9700174ec9a0617ba1bd0edb819ba861ab0d939b0c2b1d77d93cd76ac"
-    },
-    {
-      "filename": "Qwen__Qwen2.5-Math-PRM-7B__tokenizer_config.json",
-      "sha256": "f2c303ece66df80e620fe0127864885249d4100de824e3b50dc72ff98ce11442"
-    },
-    {
-      "filename": "Qwen__Qwen3-8B__config.json",
-      "sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30"
-    },
-    {
-      "filename": "Qwen__Qwen3-8B__tokenizer.json",
-      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
-    },
-    {
-      "filename": "Qwen__Qwen3-8B__tokenizer_config.json",
-      "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
-    },
-    {
-      "filename": "Skywork__Skywork-Reward-V2-Qwen3-8B__config.json",
-      "sha256": "9b98949ef09d00c7f75be85844d62130954375628c7a3362c9ca94b44bd285ec"
-    },
-    {
-      "filename": "Skywork__Skywork-Reward-V2-Qwen3-8B__tokenizer.json",
-      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
-    },
-    {
-      "filename": "Skywork__Skywork-Reward-V2-Qwen3-8B__tokenizer_config.json",
-      "sha256": "d3e08cbc53421cc90a07d40da21fbac9a912f5ffa3f08263afd04f06105b0e6f"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__reward__tldr__config.json",
-      "sha256": "370caf83967560b135bd12693b8e4830b4cc066038ae50797a32a75e2c08a0d0"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__reward__tldr__tokenizer.json",
-      "sha256": "3cf430678137c8491ca82fb7092ee49e44ad38857fffe1e4a4a5ed860139a5b8"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__reward__tldr__tokenizer_config.json",
-      "sha256": "4d1c4fdcf128d28ffcc56e21a36f7002b5e754624c9c8cbd025df7fa58af8428"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__sft__tldr__config.json",
-      "sha256": "27069a0279675aead42f0c6983255b15620dd59499bb07302c558499a63f2145"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__sft__tldr__tokenizer.json",
-      "sha256": "34b79f0d31f6f599f8e661b176d506a5b4b3d1c29103e94a3e5d305622f15064"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-1b-deduped__sft__tldr__tokenizer_config.json",
-      "sha256": "8f3298e9ce1949350fc3e9546c7301735d7a16fb9f7dd2290ac0a5481fd4eb55"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__reward__tldr__config.json",
-      "sha256": "7924161120e0156718d00f255002e9f162d80f3ea60d81d2fd28a94c5b05052d"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__reward__tldr__tokenizer.json",
-      "sha256": "3cf430678137c8491ca82fb7092ee49e44ad38857fffe1e4a4a5ed860139a5b8"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__reward__tldr__tokenizer_config.json",
-      "sha256": "4d1c4fdcf128d28ffcc56e21a36f7002b5e754624c9c8cbd025df7fa58af8428"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__sft__tldr__config.json",
-      "sha256": "827a97b33d69adc76a9a416f42d6f048a40ebee1be553b1023417b5d099649e2"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__sft__tldr__tokenizer.json",
-      "sha256": "34b79f0d31f6f599f8e661b176d506a5b4b3d1c29103e94a3e5d305622f15064"
-    },
-    {
-      "filename": "cleanrl__EleutherAI_pythia-2.8b-deduped__sft__tldr__tokenizer_config.json",
-      "sha256": "8f3298e9ce1949350fc3e9546c7301735d7a16fb9f7dd2290ac0a5481fd4eb55"
+      "model": "Skywork/Skywork-Reward-V2-Qwen3-8B",
+      "sha256": {
+        "config.json": "9b98949ef09d00c7f75be85844d62130954375628c7a3362c9ca94b44bd285ec",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "d3e08cbc53421cc90a07d40da21fbac9a912f5ffa3f08263afd04f06105b0e6f"
+      }
     }
   ],
-  "aligned_pairs": [
-    "Pythia TLDR 1B with shared PAD=50277",
-    "Pythia TLDR 2.8B with shared PAD=50277",
-    "Qwen3-8B / Skywork V2 with shared PAD=<|endoftext|>"
-  ],
-  "incompatible_pair": "Qwen2.5-Math-7B-Instruct / Qwen2.5-Math-PRM-7B: conflicting special-token IDs"
+  "pairs": [
+    {
+      "actor": "Qwen/Qwen3-14B",
+      "rm": "project-themis/Themis-RM-14B",
+      "status": "passed_after_shared_padding"
+    },
+    {
+      "actor": "Qwen/Qwen3-14B",
+      "rm": "Skywork/Skywork-Reward-V2-Qwen3-8B",
+      "status": "passed_after_shared_padding"
+    }
+  ]
 }

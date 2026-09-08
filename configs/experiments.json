@@ -1,50 +1,123 @@
 {
-  "description": "Final experiment design; consumed by the project's GRPO training adapter",
-  "seeds": [13, 42, 87],
-  "shared": {
-    "prompts_per_rollout": 32, "group_size": 8, "rollout_iterations": 1000,
-    "policy_epochs_per_rollout": 1, "optimizer_minibatch_responses": 64,
-    "temperature": 1.0, "top_p": 1.0, "top_k": 0,
-    "clip_eps": 0.2, "group_std_correction": 0, "group_std_eps": 1e-6,
-    "optimizer": "AdamW", "weight_decay": 0.01, "max_grad_norm": 1.0,
-    "precision": "bf16", "checkpoint_interval": 100,
-    "loss_reduction": "mean_tokens_per_response_then_mean_responses",
-    "token_chunk_size": 128, "vocab_chunk_size": 8192,
-    "main_methods": ["grpo", "p2t_same_rm", "vpo_rm"]
-  },
-  "search": {"tau": [0.001, 0.01, 0.1, 1.0, 10.0],
-             "p2t_alpha": [0.01, 0.03, 0.1, 0.3, 1.0], "p2t_omega": 0.6},
-  "settings": [
-    {"name": "tldr_1b", "actor": "cleanrl/EleutherAI_pythia-1b-deduped__sft__tldr",
-     "rm": "cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr",
-     "dataset": "CarperAI/openai_summarize_tldr", "split": "train",
-     "pad_token": "[PAD]", "pad_token_id": 50277,
-     "max_prompt_tokens": 1024, "max_response_tokens": 128,
-     "learning_rate": 3e-6, "beta": 0.05, "additional_methods": ["grade_ste"]},
-    {"name": "tldr_2_8b", "actor": "cleanrl/EleutherAI_pythia-2.8b-deduped__sft__tldr",
-     "rm": "cleanrl/EleutherAI_pythia-2.8b-deduped__reward__tldr",
-     "dataset": "CarperAI/openai_summarize_tldr", "split": "train",
-     "pad_token": "[PAD]", "pad_token_id": 50277,
-     "max_prompt_tokens": 1024, "max_response_tokens": 128,
-     "learning_rate": 3e-6, "beta": 0.05},
-    {"name": "instruction_8b", "actor": "Qwen/Qwen3-8B",
-     "rm": "Skywork/Skywork-Reward-V2-Qwen3-8B",
-     "dataset": "HuggingFaceH4/ultrafeedback_binarized", "split": "train_prefs",
-     "pad_token": "<|endoftext|>", "enable_thinking": false,
-     "max_prompt_tokens": 2048, "max_response_tokens": 2048,
-     "learning_rate": 1e-6, "beta": 0.01},
-    {"name": "math_8b", "actor": "Qwen/Qwen3-8B",
-     "rm": "Skywork/Skywork-Reward-V2-Qwen3-8B",
-     "dataset": "EleutherAI/hendrycks_math", "split": "train",
-     "pad_token": "<|endoftext|>", "enable_thinking": false,
-     "max_prompt_tokens": 2048, "max_response_tokens": 4096,
-     "learning_rate": 1e-6, "beta": 0.01,
-     "additional_methods": ["grail_same_grpo", "oar_g_same_grpo", "delta_same_grpo"],
-     "eval": {"benchmarks": ["MATH-500", "AIME24", "AIME25", "AMC23", "MinervaMath"],
-              "samples_per_question": 16, "temperature": 0.6, "top_p": 0.95}}
+  "description": "UltraFeedback experiment specification; trainer integration is required",
+  "seeds": [
+    42
   ],
-  "ablations": {"settings": ["tldr_2_8b", "math_8b"],
-                "utilities": ["abs(A)*norm(g)", "d"]},
-  "reporting": {"main_training_runs": 48, "ablation_training_runs": 12,
-                "additional_budgets": ["full-budget hyperparameter search", "equal-GPU-hour training"]}
+  "methods": [
+    "grpo",
+    "vpo_rm"
+  ],
+  "actor": "Qwen/Qwen3-14B",
+  "hardware": {
+    "gpu_model": "H200",
+    "gpu_count": 2,
+    "actor_device": "cuda:0",
+    "rm_device": "cuda:1",
+    "microbatch_responses": 1,
+    "generation_microbatch_responses": 1
+  },
+  "lora": {
+    "r": 64,
+    "lora_alpha": 128,
+    "lora_dropout": 0.0,
+    "bias": "none",
+    "task_type": "CAUSAL_LM",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "data": {
+    "dataset": "HuggingFaceH4/ultrafeedback_binarized",
+    "split": "train_prefs",
+    "prompt_field": "prompt",
+    "validation_prompts": 2000,
+    "split_strategy": "NFC and whitespace normalized prompt SHA256 ascending; first 2000 validation",
+    "max_prompt_tokens": 2048,
+    "max_response_tokens": 2048,
+    "max_total_tokens": 4096,
+    "overlength_prompt_policy": "filter_after_actor_and_rm_template_encoding",
+    "enable_thinking": false
+  },
+  "shared": {
+    "prompts_per_rollout": 8,
+    "group_size": 8,
+    "rollout_iterations": 1000,
+    "policy_epochs_per_rollout": 1,
+    "optimizer_minibatch_responses": 64,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 0,
+    "clip_eps": 0.2,
+    "group_std_correction": 0,
+    "group_std_eps": 1e-06,
+    "learning_rate": 1e-06,
+    "beta": 0.01,
+    "optimizer": "AdamW",
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "precision": "bf16",
+    "checkpoint_interval": 100,
+    "pad_token": "<|endoftext|>",
+    "loss_reduction": "mean_tokens_per_response_then_mean_responses",
+    "kl_estimator": "exp(ref_logp-new_logp)-(ref_logp-new_logp)-1",
+    "token_chunk_size": 128,
+    "vocab_chunk_size": 8192
+  },
+  "vpo_rm": {
+    "tau": 1.0
+  },
+  "settings": [
+    {
+      "name": "ultrafeedback_themis_14b",
+      "rm": "project-themis/Themis-RM-14B"
+    },
+    {
+      "name": "ultrafeedback_skywork_8b",
+      "rm": "Skywork/Skywork-Reward-V2-Qwen3-8B"
+    }
+  ],
+  "evaluation": {
+    "benchmarks": [
+      "AlpacaEval 2",
+      "Arena-Hard v2",
+      "IFEval"
+    ],
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "samples_per_prompt": 1,
+    "max_response_tokens": 2048,
+    "checkpoint": "final",
+    "paired_bootstrap_confidence": 0.95,
+    "judge_configuration": "pin official evaluator config and judge revision in run manifest"
+  },
+  "reporting": {
+    "training_runs": 4,
+    "metrics": [
+      "independent_quality",
+      "reward",
+      "kl",
+      "response_length",
+      "truncation_rate",
+      "entropy",
+      "credit_ess_ratio",
+      "gpu_hours",
+      "peak_memory",
+      "phase_time"
+    ],
+    "manifest_fields": [
+      "model_revisions",
+      "dataset_revision",
+      "split_hashes",
+      "software_versions",
+      "evaluation_revisions",
+      "judge_configuration",
+      "resolved_config"
+    ]
+  }
 }

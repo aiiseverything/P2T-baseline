@@ -10,7 +10,7 @@ def position_ids_from_mask(attention_mask: Tensor) -> Tensor:
 class LastTokenReward(nn.Module):
     """Decoder backbone + scalar score head; explicit score position or last valid.
 
-    For HF GPTNeoX/Qwen sequence classifiers:
+    For HF Qwen3 sequence classifiers:
         LastTokenReward(model.base_model, model.score)
     Check checkpoint-specific reward normalization separately.
     """
@@ -47,36 +47,6 @@ class LastTokenReward(nn.Module):
         if score.shape != (batch, 1):
             raise ValueError("LastTokenReward requires a scalar head")
         return score[:, 0].float()
-
-
-class MeanStepReward(nn.Module):
-    """A two-class PRM reduced to mean positive probability at step markers.
-
-    token_model must accept inputs_embeds and return logits [B,L,2].
-    step_mask marks RM-only delimiter positions, such as Qwen's <extra_0>.
-    """
-    def __init__(self, token_model: nn.Module, positive_label: int = 1):
-        super().__init__()
-        self.token_model = token_model
-        self.positive_label = positive_label
-
-    def get_input_embeddings(self):
-        return self.token_model.get_input_embeddings()
-
-    def forward(self, *, inputs_embeds: Tensor, attention_mask: Tensor,
-                step_mask: Tensor, position_ids: Tensor | None = None) -> Tensor:
-        valid = step_mask.bool() & attention_mask.bool()
-        if valid.shape != attention_mask.shape or not valid.any(-1).all():
-            raise ValueError("Each response needs at least one valid PRM step marker")
-        if position_ids is None:
-            position_ids = position_ids_from_mask(attention_mask)
-        out = self.token_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask,
-                               position_ids=position_ids, use_cache=False, return_dict=True)
-        logits = out.logits
-        if logits.shape != (*attention_mask.shape, 2):
-            raise ValueError("PRM adapter expects two-class per-position logits")
-        p = logits.float().softmax(-1)[..., self.positive_label]
-        return p.masked_fill(~valid, 0).sum(-1) / valid.sum(-1)
 
 
 def reward_input_gradients(reward_model: nn.Module, input_ids: Tensor,
