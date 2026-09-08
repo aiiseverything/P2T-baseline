@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vpo-rm"
+version = "0.1.0"
+description = "Frozen reward-model gradients for GRPO token credit assignment"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4"]
+
+[project.optional-dependencies]
+hf = ["transformers>=4.51,<6"]
+test = ["pytest>=8", "transformers>=4.51,<6"]
+
+[tool.setuptools.packages.find]
+include = ["vpo_rm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
