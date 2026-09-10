@@ -44,21 +44,56 @@ def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6):
 
 @torch.no_grad()
 def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
-             tau: float) -> Credit:
+             tau: float, weight_cap: float = 20.0) -> Credit:
+    """Allocate the sequence advantage over tokens with a scale-free softmax.
+
+    Plan B (see tau失配与修复方案.md): the raw direction signal d_t inherits an
+    uncontrolled magnitude from RM input gradients (measured ~1e-3, ESS 0.998
+    at tau=1 in p9c), so the utility is standardized per response before the
+    softmax.  tau is then dimensionless: 1.0 means the standardized utility has
+    spread ~1 (moderate concentration).  When all d_t in a response are equal
+    the standardized utility degenerates to zero and the weights fall back to
+    uniform, i.e. that response recovers plain GRPO.  ``a/sigma`` reward-unit
+    normalization cancels exactly under this standardization (sigma is constant
+    within a response), so prior behavior is subsumed, not replaced.
+
+    weight_cap bounds any single token's weight at ``weight_cap`` times the
+    uniform level (clamped then renormalized iteratively), guarding against
+    occasional softmax spikes that gradient clipping cannot see.
+    """
     mask = _mask(response_mask)
     if direction.shape != mask.shape or advantage.shape != (mask.shape[0],):
         raise ValueError("Expected direction [B, T] and advantage [B]")
     if not math.isfinite(tau) or tau <= 0:
         raise ValueError("tau must be finite and positive")
-    if not torch.isfinite(direction[mask]).all() or not torch.isfinite(advantage).all():
+    if not math.isfinite(direction[mask]).all() or not torch.isfinite(advantage).all():
         raise ValueError("Credit inputs must be finite on valid tokens")
+    if not math.isfinite(weight_cap) or weight_cap <= 1:
+        raise ValueError("weight_cap must be finite and greater than one")
     d = direction.float().masked_fill(~mask, 0)
     a = advantage.float()
-    utility = a[:, None] * d / tau
+    counts = mask.sum(-1, keepdim=True).float()
+    mean = d.sum(-1, keepdim=True) / counts
+    var = d.square().sum(-1, keepdim=True) / counts - mean.square()
+    std = var.clamp_min(0).sqrt()
+    # Relative floor: if the spread is below 0.1% of the typical magnitude the
+    # signal is numerical noise; treat the response as having nothing to
+    # allocate by and let the softmax return uniform weights.
+    floor = 1e-3 * d.abs().sum(-1, keepdim=True) / counts + torch.finfo(torch.float32).tiny
+    utility = a[:, None] * (d - mean) / (std + floor) / tau
     if not torch.isfinite(utility[mask]).all():
-        raise ValueError("Credit utility overflow; inspect reward scale and tau")
+        raise ValueError("Credit utility overflow; inspect advantage and tau")
     q = utility.masked_fill(~mask, -torch.inf).softmax(-1)
-    weight = q * mask.sum(-1, keepdim=True)
+    weight = q * counts
+    if weight_cap < float("inf"):
+        for _ in range(8):
+            clamped = weight.clamp(max=weight_cap)
+            total = clamped.sum(-1, keepdim=True)
+            if torch.allclose(total, counts, rtol=1e-6):
+                weight = clamped
+                break
+            weight = clamped * (counts / total.clamp_min(torch.finfo(torch.float32).tiny))
+        weight = weight.masked_fill(~mask, 0)
     return Credit(a[:, None] * weight, d, weight)
 
 
@@ -66,7 +101,7 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
 def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    rm_weight: Tensor, advantage: Tensor, reward_scale: Tensor,
                    response_mask: Tensor, tau: float, token_chunk_size: int = 128,
-                   vocab_chunk_size: int = 8192) -> Credit:
+                   vocab_chunk_size: int = 8192, weight_cap: float = 20.0) -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -124,7 +159,7 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
             pa = (old_logits[r, t, a].float() - log_z).exp()
             va = (f * rm_weight[a].float()).sum(-1)
             direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
-    return allocate(direction, advantage, mask, tau)
+    return allocate(direction, advantage, mask, tau, weight_cap=weight_cap)
 
 
 def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor,

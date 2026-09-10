@@ -7,7 +7,8 @@
     "grpo",
     "vpo_rm"
   ],
-  "actor": "Qwen/Qwen3-14B",
+  "actor": "Qwen/Qwen3-14B-Base",
+  "actor_note": "p9d: switched from the instruct Qwen3-14B (already aligned, no headroom) to the pretrained base, matching the BLEUBERI setup",
   "hardware": {
     "gpu_model": "H200",
     "gpu_count": 2,
@@ -56,13 +57,15 @@
     "clip_eps": 0.2,
     "group_std_correction": 0,
     "group_std_eps": 1e-06,
-    "learning_rate": 1e-06,
+    "learning_rate": 1e-04,
+    "learning_rate_note": "p9d: LoRA-appropriate rate; p9c inherited the paper's full-FT 1e-6, ~100x too small (adapter delta norm 0.25 after 200 steps, reward flat)",
     "beta": 0.01,
     "optimizer": "AdamW",
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
     "precision": "bf16",
     "checkpoint_interval": 100,
+    "adapter_interval": 50,
     "pad_token": "<|endoftext|>",
     "loss_reduction": "mean_tokens_per_response_then_mean_responses",
     "kl_estimator": "exp(ref_logp-new_logp)-(ref_logp-new_logp)-1",
@@ -70,7 +73,10 @@
     "vocab_chunk_size": 8192
   },
   "vpo_rm": {
-    "tau": 1.0
+    "tau": 1.0,
+    "tau_note": "Plan B (see tau失配与修复方案.md): softmax runs over the per-response standardized utility, so tau is dimensionless; p9c's raw-utility softmax at tau=1 measured ESS 0.998 (mechanism inert)",
+    "weight_cap": 20.0,
+    "credit_standardization": "per-response mean/std before softmax, relative floor 1e-3 of mean|d|; degenerate directions fall back to uniform GRPO weights"
   },
   "settings": [
     {
@@ -83,6 +89,16 @@
     }
   ],
   "evaluation": {
+    "offline_rm_eval": {
+      "prompts": 256,
+      "prompt_selection": "first 256 of the SHA256-ordered 2000 validation prompts; frozen across runs, checkpoints and temperatures",
+      "checkpoint_interval": 50,
+      "generation": [
+        {"temperature": 0.7, "top_p": 0.9, "n": 1, "role": "primary, matches benchmark conditions"},
+        {"temperature": 0.0, "n": 1, "role": "greedy column, repetition-loop detector for mid-training checkpoints"}
+      ],
+      "scoring": "Skywork RM, per-prompt scores logged (eval.jsonl) for paired GRPO-vs-VPO differences and bootstrap CIs"
+    },
     "benchmarks": [
       "AlpacaEval 2",
       "Arena-Hard v2",

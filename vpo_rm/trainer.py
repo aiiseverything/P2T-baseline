@@ -83,6 +83,7 @@ class TrainerConfig:
     clip_eps: float = .2
     beta: float = .01
     tau: float = 1.0
+    weight_cap: float = 20.0
     method: str = "vpo_rm"
     checkpoint_interval: int = 100
     token_chunk_size: int = 128
@@ -414,7 +415,8 @@ class VPOTrainer:
             rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
             cache = build_credit_cache(old_logits, responses, grads.to(self.actor_device), rm_weight,
                                        advantages.to(self.actor_device), scales.to(self.actor_device),
-                                       rmask, self.cfg.tau, token_chunk_size=self.cfg.token_chunk_size,
+                                       rmask, self.cfg.tau, weight_cap=self.cfg.weight_cap,
+                                       token_chunk_size=self.cfg.token_chunk_size,
                                        vocab_chunk_size=self.cfg.vocab_chunk_size)
             phase["credit_cache_sec"] = elapsed_phase(tp)
         else:
@@ -474,6 +476,8 @@ class VPOTrainer:
         metrics = {"rollout": self.rollout_index, "loss": loss_value,
                    "reward_mean": float(rewards.mean()), "reward_std": float(rewards.std(correction=0)),
                    "response_tokens": int(rmask.sum()), "grad_norm": grad_norm,
+                   "group_sigma_mean": float(scales.mean()), "group_sigma_min": float(scales.min()),
+                   "group_sigma_max": float(scales.max()),
                    "elapsed_sec": time.monotonic() - t0,
                    "gpu_hours": (time.monotonic() - self._started) * 2 / 3600}
         metrics.update({f"phase_{k}": v for k, v in phase.items()})
@@ -482,6 +486,16 @@ class VPOTrainer:
             lengths = rmask.sum(-1).float()
             ess = lengths.square() / w.square().sum(-1).clamp_min(1e-12)
             metrics["credit_ess_ratio"] = float((ess / lengths.clamp_min(1)).mean())
+            metrics["credit_weight_max"] = float(w.max(-1).values.mean())
+            # Raw (pre-standardization) utility spread: the p9c scale-mismatch
+            # gauge.  Healthy Plan B operation shows ESS well below one while
+            # this stays near the p9c value; a return of ESS ~0.998 with this
+            # gauge near zero means the direction signal itself vanished.
+            seq_adv = cache.credit.advantage.sum(-1) / lengths.clamp_min(1)
+            raw = (seq_adv[:, None] * cache.credit.direction.float()).masked_fill(~rmask, 0)
+            raw_mean = raw.sum(-1) / lengths.clamp_min(1)
+            raw_var = (raw.square().sum(-1) / lengths.clamp_min(1) - raw_mean.square()).clamp_min(0)
+            metrics["credit_raw_utility_std"] = float(raw_var.sqrt().mean())
         self._log(metrics)
         if self.rollout_index % self.cfg.checkpoint_interval == 0:
             self.save_checkpoint(self.rollout_index)

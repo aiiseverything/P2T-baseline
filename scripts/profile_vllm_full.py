@@ -42,6 +42,12 @@ def main():
     p.add_argument("--generation-microbatch", type=int, default=32)
     p.add_argument("--keep-adapters-every", type=int, default=0,
                    help="Keep step-0, every Nth adapter, and the current adapter; 0 keeps all")
+    p.add_argument("--learning-rate", type=float, default=1e-4,
+                   help="LoRA learning rate; p9c used the paper's full-FT 1e-6, ~100x too small")
+    p.add_argument("--tau", type=float, default=1.0,
+                   help="Dimensionless softmax temperature over standardized credit (Plan B)")
+    p.add_argument("--weight-cap", type=float, default=20.0,
+                   help="Max token credit weight, in multiples of the uniform level")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--generation-seed", type=int, default=0,
                    help="Matches the earlier profile's vLLM default seed")
@@ -65,6 +71,8 @@ def main():
         max_response_tokens=args.max_response_tokens,
         generation_microbatch_responses=args.generation_microbatch,
         microbatch_responses=1, seed=args.seed, smoke=False,
+        learning_rate=args.learning_rate, tau=args.tau,
+        weight_cap=args.weight_cap,
         actor_device="cuda:0", reward_device="cuda:1",
     ).resolved()
     # Seed before PEFT initializes LoRA A matrices, not only in trainer.__init__.
