@@ -19,9 +19,14 @@ def check_tokenizers(actor_tokenizer, rm_tokenizer,
         raise ValueError("Actor output vocabulary and RM embedding rows must match")
     if not av or max(av.values()) >= actor_vocab_size:
         raise ValueError("Tokenizer IDs exceed model vocabulary capacity")
-    for name in ("bos_token_id", "eos_token_id", "pad_token_id", "unk_token_id"):
-        if getattr(actor_tokenizer, name, None) != getattr(rm_tokenizer, name, None):
-            raise ValueError(f"Tokenizer special-token mismatch: {name}")
+    # Padding is shared by construction in the trainer, so it stays a hard
+    # requirement.  bos/eos/unk may legitimately differ between checkpoints of
+    # the same tokenizer family (Qwen3-Base eos is <|endoftext|> while
+    # instruct-derived RMs use <|im_end|>): generation stopping is owned by the
+    # vLLM server and RM scoring never inspects special-token semantics, so a
+    # mismatch there is not an identity violation.
+    if getattr(actor_tokenizer, "pad_token_id", None) != getattr(rm_tokenizer, "pad_token_id", None):
+        raise ValueError("Tokenizer special-token mismatch: pad_token_id")
     if hasattr(actor_tokenizer, "backend_tokenizer") and hasattr(rm_tokenizer, "backend_tokenizer"):
         def spec(tok):
             config = json.loads(tok.backend_tokenizer.to_str())

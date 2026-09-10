@@ -61,6 +61,12 @@ def main() -> None:
                         top_p=1.0, top_k=0,
                         max_tokens=int(req["max_tokens"]),
                         n=1 if probe else int(req.get("group_size", 8)),
+                        # Qwen3-Base's generation_config stops on <|endoftext|>
+                        # (151643) only; the chat template's turn end is
+                        # <|im_end|> (151645).  Accept both so a base model
+                        # mimicking the template still stops at turn end
+                        # instead of rolling into a new turn.
+                        stop_token_ids=[151643, 151645],
                     )
                     request = LoRARequest(
                         f"vpo-step-{adapter_id}", adapter_id, adapter,
