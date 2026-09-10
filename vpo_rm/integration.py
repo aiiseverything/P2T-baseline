@@ -26,14 +26,55 @@ def actor_response_logits(actor: nn.Module, input_ids: Tensor, attention_mask: T
         raise ValueError("The prediction position must belong to the Actor context")
     if position_ids is None:
         position_ids = position_ids_from_mask(attention_mask)
-    outputs = actor(input_ids=input_ids, attention_mask=attention_mask,
-                    position_ids=position_ids, use_cache=False, return_dict=True)
-    logits = gather_response(outputs.logits, predecessors, valid)
+    # The trainer pads every row to a common prompt width and appends the
+    # response contiguously.  Qwen3/Transformers supports logits_to_keep, so
+    # request only the predecessor positions needed for the response.  This
+    # avoids materializing a full-sequence logits tensor and then copying a
+    # second [B,T,V] response tensor (which is prohibitive at 2048 tokens).
+    start = int(predecessors[valid].min())
+    # The keep range must span the whole padded response width.  Deriving the end
+    # from valid positions alone compares a width-T row against a length-L range,
+    # which silently disables logits_to_keep for every response shorter than the
+    # batch maximum (63 of 64 microbatch forwards in the main configuration).
+    width = predecessors.shape[1]
+    keep = torch.arange(start, start + width, device=input_ids.device)
+    contiguous = torch.equal(predecessors[0], keep) and all(
+        torch.equal(row, predecessors[0]) for row in predecessors[1:])
+    kwargs = dict(input_ids=input_ids, attention_mask=attention_mask,
+                  position_ids=position_ids, use_cache=False, return_dict=True)
+    if contiguous:
+        try:
+            outputs = actor(**kwargs, logits_to_keep=keep)
+            logits = outputs.logits
+        except TypeError:
+            outputs = actor(**kwargs)
+            logits = gather_response(outputs.logits, predecessors, valid)
+    else:
+        outputs = actor(**kwargs)
+        logits = gather_response(outputs.logits, predecessors, valid)
     if output_mask is not None:
         if output_mask.shape != (logits.shape[-1],) or not output_mask.bool().any():
             raise ValueError("output_mask must define a nonempty vocabulary support")
         logits = logits.masked_fill(~output_mask.bool(), -torch.inf)
     return logits
+
+
+def selected_logp_from_logits(logits: Tensor, token_ids: Tensor,
+                              response_mask: Tensor, token_chunk_size: int = 128) -> Tensor:
+    """Compute selected-token log-probs without a full FP32 B×T×V copy.
+
+    The model output remains BF16.  FP32 reduction is performed one token block
+    at a time, which keeps the numerical reduction used by the loss while
+    avoiding a second full-vocabulary allocation at long response lengths.
+    """
+    safe_ids = token_ids.masked_fill(~response_mask.bool(), 0)
+    parts = []
+    for lo in range(0, logits.shape[1], max(1, int(token_chunk_size))):
+        hi = min(logits.shape[1], lo + max(1, int(token_chunk_size)))
+        z = logits[:, lo:hi].float()
+        parts.append(z.gather(-1, safe_ids[:, lo:hi, None]).squeeze(-1)
+                     - z.logsumexp(-1))
+    return torch.cat(parts, dim=1)
 
 
 @torch.no_grad()
@@ -74,9 +115,8 @@ def actor_policy_loss(actor: nn.Module, input_ids: Tensor, attention_mask: Tenso
                           token_ids, response_mask)
     logits = actor_response_logits(actor, input_ids, attention_mask, response_positions,
                                    response_mask, position_ids, output_mask)
-    safe_ids = token_ids.masked_fill(~response_mask.bool(), 0)
-    # FP32 reductions retain stable log probabilities with bf16 model weights.
-    z = logits.float()
-    new_logp = z.gather(-1, safe_ids[..., None]).squeeze(-1) - z.logsumexp(-1)
+    # FP32 reductions retain stable log probabilities with bf16 model weights,
+    # while token blocking avoids materializing a second full [B,T,V] tensor.
+    new_logp = selected_logp_from_logits(logits, token_ids, response_mask)
     return grpo_policy_loss(new_logp, cache.old_logp, cache.credit.advantage,
                             response_mask, clip_eps)

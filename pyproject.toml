@@ -11,6 +11,17 @@ dependencies = ["torch>=2.4"]
 
 [project.optional-dependencies]
 hf = ["transformers>=4.51,<6"]
+data = ["datasets>=3.0", "pyarrow>=15"]
+train = [
+  "transformers>=4.51,<6",
+  "datasets>=3.0",
+  "pyarrow>=15",
+  "peft>=0.14",
+  "accelerate>=1.0",
+  "safetensors>=0.4",
+  "pillow>=10",
+  "jinja2>=3.1",
+]
 test = ["pytest>=8", "transformers>=4.51,<6"]
 
 [tool.setuptools.packages.find]

@@ -47,7 +47,7 @@
   "shared": {
     "prompts_per_rollout": 8,
     "group_size": 8,
-    "rollout_iterations": 1000,
+    "rollout_iterations": 500,
     "policy_epochs_per_rollout": 1,
     "optimizer_minibatch_responses": 64,
     "temperature": 1.0,
