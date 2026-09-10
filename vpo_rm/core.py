@@ -86,13 +86,25 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     q = utility.masked_fill(~mask, -torch.inf).softmax(-1)
     weight = q * counts
     if weight_cap < float("inf"):
-        for _ in range(8):
-            clamped = weight.clamp(max=weight_cap)
-            total = clamped.sum(-1, keepdim=True)
-            if torch.allclose(total, counts, rtol=1e-6):
-                weight = clamped
+        # Water-filling: entries above the cap are pinned there and the missing
+        # mass is redistributed over the remaining entries proportionally to q.
+        # (A blanket renormalization would multiply clamped entries back over
+        # the cap whenever the softmax is extremely peaked.)
+        tiny = torch.finfo(torch.float32).tiny
+        for _ in range(16):
+            at_cap = weight >= weight_cap * (1 - 1e-9)
+            if not bool((at_cap & mask).any()):
                 break
-            weight = clamped * (counts / total.clamp_min(torch.finfo(torch.float32).tiny))
+            weight = weight.clamp(max=weight_cap)
+            deficit = (counts - weight.sum(-1, keepdim=True)).clamp_min(0)
+            free = ~at_cap & mask
+            give = q * free
+            norm = give.sum(-1, keepdim=True)
+            # When every surviving q has underflowed (softmax of an extreme
+            # spike in fp32) fall back to spreading the deficit uniformly.
+            share = torch.where(norm > tiny, give / norm.clamp_min(tiny),
+                                free / free.sum(-1, keepdim=True).clamp_min(1).float())
+            weight = weight + deficit * share
         weight = weight.masked_fill(~mask, 0)
     return Credit(a[:, None] * weight, d, weight)
 
