@@ -66,7 +66,7 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         raise ValueError("Expected direction [B, T] and advantage [B]")
     if not math.isfinite(tau) or tau <= 0:
         raise ValueError("tau must be finite and positive")
-    if not math.isfinite(direction[mask]).all() or not torch.isfinite(advantage).all():
+    if not torch.isfinite(direction[mask]).all() or not torch.isfinite(advantage).all():
         raise ValueError("Credit inputs must be finite on valid tokens")
     if not math.isfinite(weight_cap) or weight_cap <= 1:
         raise ValueError("weight_cap must be finite and greater than one")
