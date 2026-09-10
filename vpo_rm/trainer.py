@@ -84,6 +84,8 @@ class TrainerConfig:
     beta: float = .01
     tau: float = 1.0
     weight_cap: float = 20.0
+    min_response_tokens: int = 8
+    degenerate_penalty: float = 1.0
     method: str = "vpo_rm"
     checkpoint_interval: int = 100
     token_chunk_size: int = 128
@@ -269,6 +271,7 @@ class VPOTrainer:
                     **sub, do_sample=True, temperature=self.cfg.temperature,
                     top_p=self.cfg.top_p, top_k=self.cfg.top_k,
                     max_new_tokens=self.cfg.max_response_tokens,
+                    min_new_tokens=self.cfg.min_response_tokens,
                     num_return_sequences=n,
                     pad_token_id=self.actor_tokenizer.pad_token_id,
                     return_dict_in_generate=False)
@@ -408,7 +411,23 @@ class VPOTrainer:
               else "reward_model_forward_sec"] = elapsed_phase(tp)
         B = rewards.shape[0]
         group_ids = torch.arange(B, device=self.reward_device) // self.cfg.group_size
-        from .core import group_advantages
+        from .core import group_advantages, guard_degenerate_rewards
+        # Anti-reward-hacking layer 2: under-length responses (below
+        # min_response_tokens, unreachable in normal operation because the
+        # vLLM server enforces min_tokens) are floored below their group
+        # minimum so they can never earn positive advantage.  p9d4 showed the
+        # Skywork RM scores a bare stop token 7.7 — above real answers.
+        lengths_dev = rmask.sum(-1).to(rewards.device)
+        rewards, n_degenerate = guard_degenerate_rewards(
+            rewards, lengths_dev, group_ids,
+            self.cfg.min_response_tokens, self.cfg.degenerate_penalty)
+        if n_degenerate:
+            print(f"[reward-guard] {n_degenerate}/{B} responses under "
+                  f"{self.cfg.min_response_tokens} tokens floored below group min", flush=True)
+        mean_len = float(lengths_dev.float().mean())
+        if mean_len < self.cfg.min_response_tokens:
+            print(f"[reward-guard] WARNING mean response length {mean_len:.1f} below "
+                  f"{self.cfg.min_response_tokens} — degenerate policy suspected", flush=True)
         advantages, scales = group_advantages(rewards, group_ids)
         if self.cfg.method == "vpo_rm":
             tp = time.monotonic()
@@ -476,6 +495,8 @@ class VPOTrainer:
         metrics = {"rollout": self.rollout_index, "loss": loss_value,
                    "reward_mean": float(rewards.mean()), "reward_std": float(rewards.std(correction=0)),
                    "response_tokens": int(rmask.sum()), "grad_norm": grad_norm,
+                   "degenerate_responses": n_degenerate,
+                   "mean_response_tokens": mean_len,
                    "group_sigma_mean": float(scales.mean()), "group_sigma_min": float(scales.min()),
                    "group_sigma_max": float(scales.max()),
                    "elapsed_sec": time.monotonic() - t0,

@@ -69,7 +69,8 @@ def generate_all(runs, rendered, temps, args):
               max_model_len=4096, max_num_seqs=args.max_num_seqs,
               gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed)
     params = {t: SamplingParams(temperature=t, top_p=0.9 if t > 0 else 1.0,
-                                max_tokens=args.max_tokens, seed=args.seed)
+                                max_tokens=args.max_tokens, seed=args.seed,
+                                min_tokens=16, stop_token_ids=[151643, 151645])
               for t in temps}
     generations = {}
     for label, run_dir in runs:

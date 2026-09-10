@@ -1,6 +1,7 @@
 import pytest
 import torch
-from vpo_rm import allocate, compute_credit, group_advantages, grpo_policy_loss
+from vpo_rm import allocate, compute_credit, group_advantages, grpo_policy_loss, \
+    guard_degenerate_rewards
 
 
 @pytest.mark.parametrize('token_chunk,vocab_chunk', [(1, 1), (3, 5), (128, 8192)])
@@ -123,6 +124,30 @@ def test_loss_clipping_stopgrad_and_padding():
 def test_empty_response_rejected():
     with pytest.raises(ValueError, match='at least one'):
         allocate(torch.zeros(1, 2), torch.ones(1), torch.zeros(1, 2), 1.)
+
+
+def test_degenerate_reward_guard():
+    # Group 0: one empty response among real ones; it must rank strictly last.
+    rewards = torch.tensor([7.0, 7.5, 6.8, 7.2])
+    lengths = torch.tensor([1, 40, 35, 28])
+    groups = torch.tensor([0, 0, 0, 0])
+    patched, n = guard_degenerate_rewards(rewards, lengths, groups, min_length=8, penalty=1.0)
+    assert n == 1
+    assert patched[0] == pytest.approx(6.8 - 1.0)
+    assert torch.equal(patched[1:], rewards[1:])
+    assert patched[0] < patched[1:].min()  # never wins its group
+    # Group 1: every response degenerate -> equal rewards, zero advantage.
+    rewards2 = torch.tensor([7.0, 7.5])
+    lengths2 = torch.tensor([1, 2])
+    groups2 = torch.tensor([1, 1])
+    patched2, n2 = guard_degenerate_rewards(rewards2, lengths2, groups2, min_length=8, penalty=1.0)
+    assert n2 == 2 and torch.equal(patched2, patched2[:1].expand(2))
+    # Mixed batch across groups; untouched groups pass through unchanged.
+    rewards3 = torch.tensor([7.0, 7.5, 3.0, 3.5])
+    lengths3 = torch.tensor([50, 45, 60, 55])
+    groups3 = torch.tensor([2, 2, 3, 3])
+    patched3, n3 = guard_degenerate_rewards(rewards3, lengths3, groups3)
+    assert n3 == 0 and torch.equal(patched3, rewards3)
 
 
 def test_masked_vocabulary_matches_supported_softmax():

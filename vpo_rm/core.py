@@ -110,6 +110,33 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
 
 
 @torch.no_grad()
+def guard_degenerate_rewards(rewards: Tensor, lengths: Tensor, group_ids: Tensor,
+                             min_length: int = 8, penalty: float = 1.0):
+    """Reward guard against degenerate (under-length) responses.
+
+    A response shorter than ``min_length`` tokens cannot win its prompt group:
+    its reward is replaced by the group minimum minus ``penalty``, so within
+    GRPO's group-relative advantage it always ranks last.  Groups whose every
+    response is degenerate collapse to equal rewards (zero advantage, no
+    signal) instead of reinforcing the degenerate mode.  Returns the patched
+    rewards and the number of patched responses.
+    """
+    if rewards.ndim != 1 or lengths.shape != rewards.shape or group_ids.shape != rewards.shape:
+        raise ValueError("rewards, lengths and group_ids must share shape [B]")
+    if min_length < 1 or penalty < 0:
+        raise ValueError("min_length must be positive and penalty non-negative")
+    rewards = rewards.clone()
+    degenerate = lengths < min_length
+    if not bool(degenerate.any()):
+        return rewards, 0
+    for group in group_ids[degenerate].unique():
+        selected = group_ids == group
+        floor = rewards[selected].min() - penalty
+        rewards[selected & degenerate] = floor
+    return rewards, int(degenerate.sum())
+
+
+@torch.no_grad()
 def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    rm_weight: Tensor, advantage: Tensor, reward_scale: Tensor,
                    response_mask: Tensor, tau: float, token_chunk_size: int = 128,

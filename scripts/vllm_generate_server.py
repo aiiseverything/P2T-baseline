@@ -67,6 +67,11 @@ def main() -> None:
                         # mimicking the template still stops at turn end
                         # instead of rolling into a new turn.
                         stop_token_ids=[151643, 151645],
+                        # Anti-reward-hacking layer 1: p9d4 collapsed to
+                        # single-stop-token answers within ~60 rollouts because
+                        # the RM scores empty responses 7.7.  Forcing a floor
+                        # length makes the degenerate policy unreachable.
+                        min_tokens=16,
                     )
                     request = LoRARequest(
                         f"vpo-step-{adapter_id}", adapter_id, adapter,
