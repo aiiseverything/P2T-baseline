@@ -17,6 +17,8 @@ if ! python3 -c "import peft, pyarrow" 2>/dev/null; then
     "peft==0.20.0" "pyarrow>=15,<22"
 fi
 MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
+# Present on cloned jobs; rjob injects it only with -e DISTRIBUTED_JOB=true.
+JOB_ID="${JOB_ID:-local-$(date +%Y%m%d%H%M%S)}"; export JOB_ID
 
 method="${1:?usage: run_skywork_500.sh grpo|vpo_rm}"
 case "$method" in
