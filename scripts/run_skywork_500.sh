@@ -24,7 +24,7 @@ python3 -m pytest tests/test_core.py tests/test_integration.py tests/test_traine
 exec python3 scripts/profile_vllm_full.py \
   --method "$method" \
   --model models/Qwen3-14B-Base \
-  --learning-rate 1e-4 \
+  --learning-rate 5e-5 \
   --tau 1.0 \
   --weight-cap 20.0 \
   --max-rollouts 500 \
