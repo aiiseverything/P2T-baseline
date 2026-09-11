@@ -83,7 +83,7 @@ def main() -> None:
                         # single-stop-token answers within ~60 rollouts because
                         # the RM scores empty responses 7.7.  Forcing a floor
                         # length makes the degenerate policy unreachable.
-                        min_tokens=16,
+                        min_tokens=min(16, int(req["max_tokens"])),
                         logit_bias=_banned,
                     )
                     request = LoRARequest(

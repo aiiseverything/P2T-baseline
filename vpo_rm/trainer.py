@@ -403,10 +403,13 @@ class VPOTrainer:
                 result[start:end] = z.gather(-1, safe[..., None]).squeeze(-1) - z.logsumexp(-1)
                 if entropy_out is not None:
                     logz = z.logsumexp(-1, keepdim=True)
-                    p = (z - logz).exp()
-                    entropy_out[start:end] = -(p * (z - logz)).sum(-1).masked_fill(
+                    lp = z - logz
+                    p = lp.exp()
+                    # p==0 at -inf-masked vocab rows; 0*(-inf) would be NaN.
+                    entropy_out[start:end] = -torch.where(
+                        p > 0, p * lp, torch.zeros_like(p)).sum(-1).masked_fill(
                         ~response_mask[start:end], 0)
-                    del p, logz
+                    del p, lp, logz
                 del logits, z
         finally:
             if switched:
@@ -504,7 +507,11 @@ class VPOTrainer:
                     r, t = rows[lo:lo + chunk], times[lo:lo + chunk]
                     z = old_logits[r, t].float()
                     logz = z.logsumexp(-1, keepdim=True)
-                    entropy[r, t] = -(z - logz).exp().mul(z - logz).sum(-1)
+                    lp = z - logz
+                    p = lp.exp()
+                    entropy[r, t] = -torch.where(
+                        p > 0, p * lp, torch.zeros_like(p)).sum(-1)
+                    del p, lp, logz
         else:
             tp = time.monotonic()
             entropy = torch.zeros(responses.shape, dtype=torch.float32, device=self.actor_device)
