@@ -83,7 +83,7 @@ class TrainerConfig:
     clip_eps: float = .2
     beta: float = .01
     tau: float = 1.0
-    weight_cap: float = 20.0
+    credit_lambda: float = 2.0
     min_response_tokens: int = 8
     degenerate_penalty: float = 1.0
     init_adapter: str = ""
@@ -488,7 +488,7 @@ class VPOTrainer:
             rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
             cache = build_credit_cache(old_logits, responses, grads.to(self.actor_device), rm_weight,
                                        advantages.to(self.actor_device), scales.to(self.actor_device),
-                                       rmask, self.cfg.tau, weight_cap=self.cfg.weight_cap,
+                                       rmask, self.cfg.tau, credit_lambda=self.cfg.credit_lambda,
                                        token_chunk_size=self.cfg.token_chunk_size,
                                        vocab_chunk_size=self.cfg.vocab_chunk_size)
             phase["credit_cache_sec"] = elapsed_phase(tp)
@@ -595,7 +595,28 @@ class VPOTrainer:
             lengths = rmask.sum(-1).float()
             ess = lengths.square() / w.square().sum(-1).clamp_min(1e-12)
             metrics["credit_ess_ratio"] = float((ess / lengths.clamp_min(1)).mean())
-            metrics["credit_weight_max"] = float(w.max(-1).values.mean())
+            # Per-rollout weight-distribution summary plus a full histogram in
+            # credit_stats.jsonl (fixed 0.05-wide bins over [0, 3]) with the
+            # per-response adaptive taus — the analysis artifacts for the
+            # lambda-band dose-response study.
+            wv = w[rmask]
+            qs = torch.quantile(wv, torch.tensor([.05, .25, .5, .75, .95], device=wv.device))
+            metrics["credit_w_mean"] = float(wv.mean())
+            metrics["credit_w_std"] = float(wv.std(unbiased=False))
+            metrics["credit_w_p05"] = float(qs[0])
+            metrics["credit_w_p50"] = float(qs[2])
+            metrics["credit_w_p95"] = float(qs[4])
+            metrics["credit_w_max"] = float(wv.max())
+            tau_used = cache.credit.tau_used
+            metrics["credit_tau_adaptive_mean"] = float(tau_used.mean())
+            metrics["credit_lambda_binding"] = float(
+                (tau_used > self.cfg.tau).float().mean())
+            hist = torch.histogram(wv, bins=torch.linspace(0, 3.0, 61, device=wv.device))
+            with (Path(self.cfg.output_dir) / "credit_stats.jsonl").open("a") as f:
+                f.write(json.dumps({"rollout": self.rollout_index,
+                                    "tau": [round(float(t), 4) for t in tau_used],
+                                    "w_hist": [int(c) for c in hist.hist],
+                                    "bin_width": 0.05}) + "\n")
             # Raw (pre-standardization) utility spread: the p9c scale-mismatch
             # gauge.  Healthy Plan B operation shows ESS well below one while
             # this stays near the p9c value; a return of ESS ~0.998 with this

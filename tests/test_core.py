@@ -65,23 +65,24 @@ def test_entropy_allocation_optimality_for_both_signs():
     d = torch.randn(2, 6)
     a = torch.tensor([1., -1.])
     tau = .8
-    q = allocate(d, a, torch.ones_like(d, dtype=torch.bool), tau).weight / 6
+    credit = allocate(d, a, torch.ones_like(d, dtype=torch.bool), tau, credit_lambda=50.0)
+    q = credit.weight / 6
     r = torch.randn_like(d).softmax(-1)
-    # Plan B optimality holds for the standardized utility (see
-    # tau失配与修复方案.md section 4.3): q = softmax(a*z/tau) with
-    # z = (d - mean) / (std + floor) solves the KL-regularized allocation
-    # problem over z.  The cap is inactive here (weights stay below it).
+    # Optimality holds for the standardized utility at the SOLVED temperature
+    # (the lambda band only raises tau when the natural softmax is too peaked;
+    # with lambda=50 here it stays at the requested tau).
     mean = d.mean(-1, keepdim=True)
     std = d.std(-1, correction=0, keepdim=True)
     floor = 1e-3 * d.abs().mean(-1, keepdim=True) + torch.finfo(torch.float32).tiny
     z = (d - mean) / (std + floor)
+    t = credit.tau_used
     def F(x):
-        return (x * (a[:, None] * z - tau * (6*x).log())).sum(-1)
-    gap = tau * (r * (r / q).log()).sum(-1)
+        return (x * (a[:, None] * z - t[:, None] * (6*x).log())).sum(-1)
+    gap = t * (r * (r / q).log()).sum(-1)
     torch.testing.assert_close(F(q) - F(r), gap)
 
 
-def test_standardized_allocation_engages_and_caps():
+def test_standardized_allocation_engages_and_bands():
     torch.manual_seed(3)
     # The p9c regime: tiny-magnitude directions flattened softmax to uniform.
     # Per-response standardization must engage regardless of absolute scale.
@@ -89,7 +90,7 @@ def test_standardized_allocation_engages_and_caps():
     a = torch.tensor([1.0])
     c = allocate(d, a, torch.ones(1, 3, dtype=torch.bool), 1.0)
     torch.testing.assert_close(c.weight.sum(-1), torch.tensor([3.0]))
-    assert c.weight.max() > 1.5 and c.weight.min() < 0.5
+    assert c.weight.max() > 1.1 and c.weight.min() < 0.9
     torch.testing.assert_close(c.advantage.mean(-1), a)
     # Scale-free: the same relative shape at 1000x magnitude gives identical
     # weights (sigma-style unit normalization is also cancelled exactly).
@@ -98,14 +99,21 @@ def test_standardized_allocation_engages_and_caps():
     # Degenerate direction (all tokens equal): falls back to uniform GRPO.
     c3 = allocate(torch.full((1, 4), 5e-3), torch.ones(1), torch.ones(1, 4, dtype=torch.bool), 1.0)
     torch.testing.assert_close(c3.weight, torch.ones(1, 4))
-    # Weight cap: one dominant token in a long response stays bounded and the
-    # per-response mean of the token advantage is preserved.
+    # Lambda band: one dominant token in a long response stays within the band
+    # while the per-response mean of the token advantage is preserved.  The
+    # band must bind (adaptive tau raised) for this extreme distribution.
     dd = torch.zeros(1, 64)
     dd[0, 0] = 1.0
-    c4 = allocate(dd, torch.ones(1), torch.ones(1, 64, dtype=torch.bool), 0.05, weight_cap=20.0)
-    assert c4.weight.max() <= 20.0 * 1.01
+    c4 = allocate(dd, torch.ones(1), torch.ones(1, 64, dtype=torch.bool), 0.05)
+    assert c4.weight.max() <= 2.0 * 1.001
+    assert c4.weight.min() >= 0.5 - 1e-3
+    assert float(c4.tau_used[0]) > 0.05  # tau was raised off the requested 0.05
     torch.testing.assert_close(c4.weight.sum(-1), torch.tensor([64.0]))
     torch.testing.assert_close(c4.advantage.mean(-1), torch.ones(1))
+    # Golden identity: lambda = 1 recovers exact GRPO uniform weights.
+    c5 = allocate(torch.randn(4, 32), torch.randn(4), torch.ones(4, 32, dtype=torch.bool),
+                  0.3, credit_lambda=1.0)
+    torch.testing.assert_close(c5.weight, torch.ones(4, 32))
 
 
 def test_loss_clipping_stopgrad_and_padding():

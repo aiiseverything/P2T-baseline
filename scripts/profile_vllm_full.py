@@ -46,8 +46,8 @@ def main():
                    help="LoRA learning rate; p9c used the paper's full-FT 1e-6, ~100x too small")
     p.add_argument("--tau", type=float, default=1.0,
                    help="Dimensionless softmax temperature over standardized credit (Plan B)")
-    p.add_argument("--weight-cap", type=float, default=20.0,
-                   help="Max token credit weight, in multiples of the uniform level")
+    p.add_argument("--credit-lambda", type=float, default=2.0,
+                   help="Credit band: adaptive tau caps any token weight at lambda x uniform")
     p.add_argument("--beta", type=float, default=0.01, help="KL coefficient")
     p.add_argument("--init-adapter", default="",
                    help="Shared SFT initialization for both arms (stage 0 output)")
@@ -81,7 +81,7 @@ def main():
         generation_microbatch_responses=args.generation_microbatch,
         microbatch_responses=1, seed=args.seed, smoke=False,
         learning_rate=args.learning_rate, tau=args.tau,
-        weight_cap=args.weight_cap, beta=args.beta,
+        credit_lambda=args.credit_lambda, beta=args.beta,
         init_adapter=args.init_adapter, kl_reference=args.kl_reference,
         length_penalty_slope=args.length_penalty_slope,
         length_penalty_anchor=args.length_penalty_anchor,

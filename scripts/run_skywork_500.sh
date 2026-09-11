@@ -42,7 +42,7 @@ exec python3 scripts/profile_vllm_full.py \
   --model models/Qwen3-14B-Base \
   --learning-rate "$LR" \
   --tau 1.0 \
-  --weight-cap 20.0 \
+  --credit-lambda "${CREDIT_LAMBDA:-2.0}" \
   --beta 0.03 \
   --init-adapter models/sft-init-qwen3-14b-base \
   --kl-reference init \

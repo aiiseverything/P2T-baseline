@@ -80,12 +80,12 @@ def selected_logp_from_logits(logits: Tensor, token_ids: Tensor,
 @torch.no_grad()
 def build_credit_cache(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                        rm_weight: Tensor, advantage: Tensor, reward_scale: Tensor,
-                       response_mask: Tensor, tau: float, weight_cap: float = 20.0,
+                       response_mask: Tensor, tau: float, credit_lambda: float = 2.0,
                        **chunk_sizes) -> RolloutCache:
     """Call after complete-group reward aggregation; reuse throughout this rollout."""
     credit = compute_credit(old_logits, token_ids, input_grads, rm_weight,
                             advantage, reward_scale, response_mask, tau,
-                            weight_cap=weight_cap, **chunk_sizes)
+                            credit_lambda=credit_lambda, **chunk_sizes)
     # Token blocks avoid allocating an additional full [B,T,V] log-softmax.
     old_logp = torch.zeros_like(credit.direction)
     rows, times = response_mask.bool().nonzero(as_tuple=True)
