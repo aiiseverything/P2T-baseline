@@ -111,29 +111,35 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
 
 @torch.no_grad()
 def guard_degenerate_rewards(rewards: Tensor, lengths: Tensor, group_ids: Tensor,
-                             min_length: int = 8, penalty: float = 1.0):
-    """Reward guard against degenerate (under-length) responses.
+                             min_length: int = 8, penalty: float = 1.0,
+                             also_floor: Tensor | None = None):
+    """Reward guard against degenerate (under-length or flagged) responses.
 
-    A response shorter than ``min_length`` tokens cannot win its prompt group:
-    its reward is replaced by the group minimum minus ``penalty``, so within
-    GRPO's group-relative advantage it always ranks last.  Groups whose every
-    response is degenerate collapse to equal rewards (zero advantage, no
-    signal) instead of reinforcing the degenerate mode.  Returns the patched
-    rewards and the number of patched responses.
+    A response shorter than ``min_length`` tokens (or selected by the boolean
+    ``also_floor`` mask, e.g. truncated/overlong responses) cannot win its
+    prompt group: its reward is replaced by the group minimum minus
+    ``penalty``, so within GRPO's group-relative advantage it always ranks
+    last.  Groups whose every response is flagged collapse to equal rewards
+    (zero advantage, no signal) instead of reinforcing the flagged mode.
+    Returns the patched rewards and the number of patched responses.
     """
     if rewards.ndim != 1 or lengths.shape != rewards.shape or group_ids.shape != rewards.shape:
         raise ValueError("rewards, lengths and group_ids must share shape [B]")
     if min_length < 1 or penalty < 0:
         raise ValueError("min_length must be positive and penalty non-negative")
+    if also_floor is not None and (also_floor.shape != rewards.shape or also_floor.dtype != torch.bool):
+        raise ValueError("also_floor must be a boolean tensor of shape [B]")
     rewards = rewards.clone()
-    degenerate = lengths < min_length
-    if not bool(degenerate.any()):
+    flagged = lengths < min_length
+    if also_floor is not None:
+        flagged = flagged | also_floor
+    if not bool(flagged.any()):
         return rewards, 0
-    for group in group_ids[degenerate].unique():
+    for group in group_ids[flagged].unique():
         selected = group_ids == group
         floor = rewards[selected].min() - penalty
-        rewards[selected & degenerate] = floor
-    return rewards, int(degenerate.sum())
+        rewards[selected & flagged] = floor
+    return rewards, int(flagged.sum())
 
 
 @torch.no_grad()

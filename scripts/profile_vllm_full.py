@@ -48,6 +48,15 @@ def main():
                    help="Dimensionless softmax temperature over standardized credit (Plan B)")
     p.add_argument("--weight-cap", type=float, default=20.0,
                    help="Max token credit weight, in multiples of the uniform level")
+    p.add_argument("--beta", type=float, default=0.01, help="KL coefficient")
+    p.add_argument("--init-adapter", default="",
+                   help="Shared SFT initialization for both arms (stage 0 output)")
+    p.add_argument("--kl-reference", choices=["rollout", "init"], default="rollout",
+                   help="KL anchored to the SFT init ('init') or per-step rollout policy")
+    p.add_argument("--length-penalty-slope", type=float, default=0.0,
+                   help="Reward debias per token below the anchor (p9g calibrated: 5.06e-3)")
+    p.add_argument("--length-penalty-anchor", type=int, default=600)
+    p.add_argument("--min-response-tokens", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--generation-seed", type=int, default=0,
                    help="Matches the earlier profile's vLLM default seed")
@@ -72,7 +81,11 @@ def main():
         generation_microbatch_responses=args.generation_microbatch,
         microbatch_responses=1, seed=args.seed, smoke=False,
         learning_rate=args.learning_rate, tau=args.tau,
-        weight_cap=args.weight_cap,
+        weight_cap=args.weight_cap, beta=args.beta,
+        init_adapter=args.init_adapter, kl_reference=args.kl_reference,
+        length_penalty_slope=args.length_penalty_slope,
+        length_penalty_anchor=args.length_penalty_anchor,
+        min_response_tokens=args.min_response_tokens,
         actor_device="cuda:0", reward_device="cuda:1",
     ).resolved()
     # Seed before PEFT initializes LoRA A matrices, not only in trainer.__init__.

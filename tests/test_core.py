@@ -148,6 +148,14 @@ def test_degenerate_reward_guard():
     groups3 = torch.tensor([2, 2, 3, 3])
     patched3, n3 = guard_degenerate_rewards(rewards3, lengths3, groups3)
     assert n3 == 0 and torch.equal(patched3, rewards3)
+    # Overlong (truncated) responses flagged via also_floor rank last too.
+    rewards4 = torch.tensor([7.0, 7.5, 6.0])
+    lengths4 = torch.tensor([2048, 500, 480])
+    groups4 = torch.tensor([4, 4, 4])
+    patched4, n4 = guard_degenerate_rewards(rewards4, lengths4, groups4,
+                                            min_length=8, penalty=1.0,
+                                            also_floor=lengths4 >= 2047)
+    assert n4 == 1 and patched4[0] == pytest.approx(6.0 - 1.0)
 
 
 def test_masked_vocabulary_matches_supported_softmax():

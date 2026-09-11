@@ -8,6 +8,16 @@ export PYTHONUNBUFFERED=1
 # rollouts.  The vLLM engine runs in a separate process and is unaffected.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# The derived training image is not pullable on every node; the base vLLM
+# image plus an idempotent internal-mirror install works everywhere.
+if ! python3 -c "import peft, pyarrow" 2>/dev/null; then
+  python3 -m pip install --no-cache-dir \
+    --index-url http://mirrors.i.h.pjlab.org.cn/repository/pypi-proxy/simple/ \
+    --trusted-host mirrors.i.h.pjlab.org.cn \
+    "peft==0.20.0" "pyarrow>=15,<22"
+fi
+MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
+
 method="${1:?usage: run_skywork_500.sh grpo|vpo_rm}"
 case "$method" in
   grpo|vpo_rm) ;;
@@ -18,16 +28,23 @@ esac
 # node, so tests can only run inside the job image).
 python3 -m pytest tests/test_core.py tests/test_integration.py tests/test_trainer.py -q
 
-# p9d: Qwen3-14B-Base actor (paper headroom), LoRA lr 1e-4 (p9c's 1e-6 was the
-# paper's full-FT rate), Plan B credit (standardized, weight-capped), adapters
-# every 50 for the offline 256-prompt eval curve.
+# p9g: shared SFT init (stage 0), init-anchored KL (beta 0.03), calibrated
+# length debias (5.06e-3/token below 600, overlong floored), guard at 64,
+# lr 5e-5, entropy monitoring.  Rationale: p9f proved the RM's short-answer
+# bias is lr-insensitive, so the fixes target the reward landscape.
 exec python3 scripts/profile_vllm_full.py \
   --method "$method" \
   --model models/Qwen3-14B-Base \
   --learning-rate 5e-5 \
   --tau 1.0 \
   --weight-cap 20.0 \
-  --max-rollouts 500 \
+  --beta 0.03 \
+  --init-adapter models/sft-init-qwen3-14b-base \
+  --kl-reference init \
+  --length-penalty-slope 0.00506 \
+  --length-penalty-anchor 600 \
+  --min-response-tokens 64 \
+  --max-rollouts "$MAX_ROLLOUTS" \
   --max-response-tokens 2048 \
   --generation-microbatch 32 \
   --keep-adapters-every 50 \

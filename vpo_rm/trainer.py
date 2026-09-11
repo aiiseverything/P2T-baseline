@@ -86,6 +86,10 @@ class TrainerConfig:
     weight_cap: float = 20.0
     min_response_tokens: int = 8
     degenerate_penalty: float = 1.0
+    init_adapter: str = ""
+    kl_reference: str = "rollout"
+    length_penalty_slope: float = 0.0
+    length_penalty_anchor: int = 600
     method: str = "vpo_rm"
     checkpoint_interval: int = 100
     token_chunk_size: int = 128
@@ -106,6 +110,10 @@ class TrainerConfig:
         c = TrainerConfig(**asdict(self))
         if c.method not in {"grpo", "vpo_rm"}:
             raise ValueError("method must be grpo or vpo_rm")
+        if c.kl_reference not in {"rollout", "init"}:
+            raise ValueError("kl_reference must be rollout or init")
+        if c.kl_reference == "init" and not c.init_adapter:
+            raise ValueError("kl_reference=init requires init_adapter")
         if c.smoke:
             c.rollout_iterations = min(c.rollout_iterations, c.max_smoke_rollouts)
             c.prompts_per_rollout = min(c.prompts_per_rollout, c.max_smoke_prompts)
@@ -204,10 +212,19 @@ class VPOTrainer:
                          reward.get_input_embeddings().weight.shape[0])
         if c.lora:
             try:
-                from peft import LoraConfig, get_peft_model
-                actor = get_peft_model(actor, LoraConfig(r=c.lora_r, lora_alpha=c.lora_alpha,
-                    lora_dropout=c.lora_dropout, bias="none", task_type="CAUSAL_LM",
-                    target_modules=c.target_modules))
+                from peft import LoraConfig, PeftModel, get_peft_model
+                if c.init_adapter:
+                    # p9g: shared SFT initialization for both arms.  The same
+                    # checkpoint is mounted a second time as a frozen "ref"
+                    # adapter for the init-anchored KL; no extra backbone copy.
+                    actor = PeftModel.from_pretrained(actor, c.init_adapter, is_trainable=True)
+                    if c.kl_reference == "init":
+                        actor.load_adapter(c.init_adapter, adapter_name="ref", is_trainable=False)
+                    actor.set_adapter("default")
+                else:
+                    actor = get_peft_model(actor, LoraConfig(r=c.lora_r, lora_alpha=c.lora_alpha,
+                        lora_dropout=c.lora_dropout, bias="none", task_type="CAUSAL_LM",
+                        target_modules=c.target_modules))
             except ImportError:
                 if c.smoke:
                     # tiny local smoke environments often omit peft; train the model directly.
@@ -361,20 +378,39 @@ class VPOTrainer:
         return rewards, grads, None, None
 
     @torch.no_grad()
-    def _old_logp_microbatch(self, input_ids, attention_mask, positions, responses, response_mask):
-        """Cache old-policy log-probabilities without a full B×T×V allocation."""
+    def _old_logp_microbatch(self, input_ids, attention_mask, positions, responses, response_mask,
+                             adapter=None, entropy_out=None):
+        """Cache log-probabilities without a full B×T×V allocation.
+
+        adapter="ref" evaluates the frozen init adapter (anchored-KL reference)
+        by switching the active LoRA and restoring the trainable one after.
+        entropy_out optionally accumulates per-token response entropy.
+        """
         B, T = responses.shape
         result = torch.zeros((B, T), dtype=torch.float32, device=self.actor_device)
         micro = max(1, int(self.cfg.microbatch_responses))
-        for start in range(0, B, micro):
-            end = min(B, start + micro)
-            logits = actor_response_logits(self.actor, input_ids[start:end], attention_mask[start:end],
-                                           positions[start:end], response_mask[start:end],
-                                           output_mask=self.output_mask)
-            z = logits.float()
-            safe = responses[start:end].masked_fill(~response_mask[start:end], 0)
-            result[start:end] = z.gather(-1, safe[..., None]).squeeze(-1) - z.logsumexp(-1)
-            del logits, z
+        switched = adapter is not None
+        if switched:
+            self.actor.set_adapter(adapter)
+        try:
+            for start in range(0, B, micro):
+                end = min(B, start + micro)
+                logits = actor_response_logits(self.actor, input_ids[start:end], attention_mask[start:end],
+                                               positions[start:end], response_mask[start:end],
+                                               output_mask=self.output_mask)
+                z = logits.float()
+                safe = responses[start:end].masked_fill(~response_mask[start:end], 0)
+                result[start:end] = z.gather(-1, safe[..., None]).squeeze(-1) - z.logsumexp(-1)
+                if entropy_out is not None:
+                    logz = z.logsumexp(-1, keepdim=True)
+                    p = (z - logz).exp()
+                    entropy_out[start:end] = -(p * (z - logz)).sum(-1).masked_fill(
+                        ~response_mask[start:end], 0)
+                    del p, logz
+                del logits, z
+        finally:
+            if switched:
+                self.actor.set_adapter("default")
         return result
 
     def train_rollout(self, prompts: Sequence[str]) -> dict[str, float]:
@@ -418,9 +454,22 @@ class VPOTrainer:
         # minimum so they can never earn positive advantage.  p9d4 showed the
         # Skywork RM scores a bare stop token 7.7 — above real answers.
         lengths_dev = rmask.sum(-1).to(rewards.device)
+        # Calibrated length debias (p9g): the RM pays ~3.4 points per 1000
+        # tokens of shortness on real answers (regression over the healthy
+        # phases of p9d4/p9e/p9f, n=140).  Subtract 1.5x that slope below the
+        # 600-token anchor so the short-answer slide stops paying; above the
+        # anchor nothing changes.  Truncated (overlong) responses are floored
+        # below their group minimum alongside the under-length guard.
+        length_penalty = torch.zeros_like(rewards)
+        if self.cfg.length_penalty_slope > 0:
+            shortfall = (self.cfg.length_penalty_anchor - lengths_dev).clamp_min(0)
+            length_penalty = self.cfg.length_penalty_slope * shortfall.float()
+            rewards = rewards - length_penalty
+        truncated = lengths_dev >= (self.cfg.max_response_tokens - 1)
         rewards, n_degenerate = guard_degenerate_rewards(
             rewards, lengths_dev, group_ids,
-            self.cfg.min_response_tokens, self.cfg.degenerate_penalty)
+            self.cfg.min_response_tokens, self.cfg.degenerate_penalty,
+            also_floor=truncated if self.cfg.length_penalty_slope > 0 else None)
         if n_degenerate:
             print(f"[reward-guard] {n_degenerate}/{B} responses under "
                   f"{self.cfg.min_response_tokens} tokens floored below group min", flush=True)
@@ -429,6 +478,8 @@ class VPOTrainer:
             print(f"[reward-guard] WARNING mean response length {mean_len:.1f} below "
                   f"{self.cfg.min_response_tokens} — degenerate policy suspected", flush=True)
         advantages, scales = group_advantages(rewards, group_ids)
+        ref_logp = None
+        entropy = None
         if self.cfg.method == "vpo_rm":
             tp = time.monotonic()
             rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
@@ -438,9 +489,30 @@ class VPOTrainer:
                                        token_chunk_size=self.cfg.token_chunk_size,
                                        vocab_chunk_size=self.cfg.vocab_chunk_size)
             phase["credit_cache_sec"] = elapsed_phase(tp)
+            if self.cfg.kl_reference == "init":
+                tp = time.monotonic()
+                ref_logp = self._old_logp_microbatch(input_ids, full_mask, positions,
+                                                     responses, rmask, adapter="ref")
+                phase["ref_logp_sec"] = elapsed_phase(tp)
+            # Rollout-policy entropy for collapse monitoring, from the already
+            # materialized old logits (no extra forward).
+            with torch.no_grad():
+                entropy = torch.zeros_like(cache.credit.direction)
+                rows, times = rmask.bool().nonzero(as_tuple=True)
+                chunk = max(1, int(self.cfg.token_chunk_size)) * 4
+                for lo in range(0, rows.numel(), chunk):
+                    r, t = rows[lo:lo + chunk], times[lo:lo + chunk]
+                    z = old_logits[r, t].float()
+                    logz = z.logsumexp(-1, keepdim=True)
+                    entropy[r, t] = -(z - logz).exp().mul(z - logz).sum(-1)
         else:
             tp = time.monotonic()
-            old_logp = self._old_logp_microbatch(input_ids, full_mask, positions, responses, rmask)
+            entropy = torch.zeros(responses.shape, dtype=torch.float32, device=self.actor_device)
+            old_logp = self._old_logp_microbatch(input_ids, full_mask, positions, responses, rmask,
+                                                 entropy_out=entropy)
+            if self.cfg.kl_reference == "init":
+                ref_logp = self._old_logp_microbatch(input_ids, full_mask, positions,
+                                                     responses, rmask, adapter="ref")
             phase["actor_old_logp_sec"] = elapsed_phase(tp)
             phase["credit_cache_sec"] = 0.0
             token_adv = advantages.to(self.actor_device)[:, None].expand_as(rmask)
@@ -476,9 +548,12 @@ class VPOTrainer:
                                           cache.credit.advantage[sl], rmask[sl],
                                           self.cfg.clip_eps)
             if self.cfg.beta:
-                # The rollout policy is the frozen reference for this update.  This
-                # estimator is zero at the start of each rollout and remains finite.
-                delta = cache.old_logp[sl].detach() - new_logp
+                # KL reference: the rollout policy (per-step stabilizer, legacy)
+                # or the frozen SFT initialization (p9g anchor against drift
+                # and degenerate modes).  The k3 estimator stays >= 0.
+                base_logp = (ref_logp[sl] if ref_logp is not None
+                             else cache.old_logp[sl].detach())
+                delta = base_logp - new_logp
                 kl = (delta.exp() - delta - 1).masked_fill(~rmask[sl], 0)
                 chunk_loss = chunk_loss + self.cfg.beta * (kl.sum(-1) / rmask[sl].sum(-1)).mean()
             weight = (end - start) / B
@@ -497,6 +572,12 @@ class VPOTrainer:
                    "response_tokens": int(rmask.sum()), "grad_norm": grad_norm,
                    "degenerate_responses": n_degenerate,
                    "mean_response_tokens": mean_len,
+                   "length_penalty_mean": float(length_penalty.mean()),
+                   "truncated_responses": int(truncated.sum()),
+                   "response_entropy": float((entropy.sum() / rmask.sum().clamp_min(1)).item())
+                   if entropy is not None else 0.0,
+                   "kl_to_init": float((ref_logp - cache.old_logp).masked_fill(~rmask, 0).sum()
+                                       / rmask.sum().clamp_min(1)) if ref_logp is not None else 0.0,
                    "group_sigma_mean": float(scales.mean()), "group_sigma_min": float(scales.min()),
                    "group_sigma_max": float(scales.max()),
                    "elapsed_sec": time.monotonic() - t0,
