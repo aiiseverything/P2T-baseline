@@ -17,6 +17,9 @@ if ! python3 -c "import peft, pyarrow" 2>/dev/null; then
     "peft==0.20.0" "pyarrow>=15,<22"
 fi
 MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
+# Per-arm overrides: p9h VPO runs at LR=3e-5 (credit concentration acts as a
+# ~10-20x effective-lr multiplier on hot tokens; see vpo坍缩分析-p9g.md).
+LR="${LR:-5e-5}"
 # Present on cloned jobs; rjob injects it only with -e DISTRIBUTED_JOB=true.
 JOB_ID="${JOB_ID:-local-$(date +%Y%m%d%H%M%S)}"; export JOB_ID
 
@@ -37,7 +40,7 @@ python3 -m pytest tests/test_core.py tests/test_integration.py tests/test_traine
 exec python3 scripts/profile_vllm_full.py \
   --method "$method" \
   --model models/Qwen3-14B-Base \
-  --learning-rate 5e-5 \
+  --learning-rate "$LR" \
   --tau 1.0 \
   --weight-cap 20.0 \
   --beta 0.03 \

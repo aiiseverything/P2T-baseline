@@ -38,6 +38,9 @@ def main() -> None:
     _known = set(_tok.get_vocab().values())
     _vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     _banned = {i: -100.0 for i in range(_vocab_size) if i not in _known}
+    # p9h VPO fix: suppress exact-repetition attractors (the p9g newline-spam
+    # entropy collapse).  Off by default; enabled per job via PRESENCE_PENALTY.
+    _presence = float(os.environ.get("PRESENCE_PENALTY", "0.0"))
 
     llm = LLM(
         model=args.model, dtype="bfloat16", trust_remote_code=True,
@@ -85,6 +88,7 @@ def main() -> None:
                         # length makes the degenerate policy unreachable.
                         min_tokens=min(16, int(req["max_tokens"])),
                         logit_bias=_banned,
+                        presence_penalty=_presence,
                     )
                     request = LoRARequest(
                         f"vpo-step-{adapter_id}", adapter_id, adapter,
