@@ -27,6 +27,18 @@ def main() -> None:
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
 
+    # Qwen3 reserves 271 embedding rows beyond the tokenizer's vocab (model
+    # vocab 151936 vs 151665 entries).  vLLM samples over all rows, but the
+    # trainer's output support only admits realized tokens, and a rare hit on
+    # a reserved id crashed the credit integrity check (p9e rollout 85, p9g
+    # smoke rollout 1).  Ban them here so generation and training share the
+    # same support, per the contract in vpo_rm/alignment.py.
+    from transformers import AutoConfig, AutoTokenizer
+    _tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    _known = set(_tok.get_vocab().values())
+    _vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
+    _banned = {i: -100.0 for i in range(_vocab_size) if i not in _known}
+
     llm = LLM(
         model=args.model, dtype="bfloat16", trust_remote_code=True,
         enable_lora=True, max_lora_rank=64, max_loras=2, max_cpu_loras=2,
@@ -72,6 +84,7 @@ def main() -> None:
                         # the RM scores empty responses 7.7.  Forcing a floor
                         # length makes the degenerate policy unreachable.
                         min_tokens=16,
+                        logit_bias=_banned,
                     )
                     request = LoRARequest(
                         f"vpo-step-{adapter_id}", adapter_id, adapter,

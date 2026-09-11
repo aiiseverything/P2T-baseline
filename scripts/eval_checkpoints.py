@@ -60,6 +60,14 @@ def discover_adapters(run_dir: Path) -> list[tuple[int, Path]]:
     return sorted(steps)
 
 
+def _banned_ids(model_path: str) -> dict[int, float]:
+    """Reserve-row ban shared with the training server (see vllm_generate_server)."""
+    from transformers import AutoConfig, AutoTokenizer
+    known = set(AutoTokenizer.from_pretrained(model_path, trust_remote_code=True).get_vocab().values())
+    vocab_size = AutoConfig.from_pretrained(model_path, trust_remote_code=True).vocab_size
+    return {i: -100.0 for i in range(vocab_size) if i not in known}
+
+
 def generate_all(runs, rendered, temps, args):
     """In-process vLLM: one pass over (run, step, temp); returns token-id lists."""
     from vllm import LLM, SamplingParams
@@ -70,7 +78,8 @@ def generate_all(runs, rendered, temps, args):
               gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed)
     params = {t: SamplingParams(temperature=t, top_p=0.9 if t > 0 else 1.0,
                                 max_tokens=args.max_tokens, seed=args.seed,
-                                min_tokens=16, stop_token_ids=[151643, 151645])
+                                min_tokens=16, stop_token_ids=[151643, 151645],
+                                logit_bias=_banned_ids(args.model))
               for t in temps}
     generations = {}
     for label, run_dir in runs:
