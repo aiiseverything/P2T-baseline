@@ -599,7 +599,10 @@ class VPOTrainer:
             # credit_stats.jsonl (fixed 0.05-wide bins over [0, 3]) with the
             # per-response adaptive taus — the analysis artifacts for the
             # lambda-band dose-response study.
-            wv = w[rmask]
+            # Distribution stats on a CPU copy: aten::histogram with tensor
+            # bins has no CUDA kernel in this build, and the transfer of
+            # ~B*T floats is negligible.
+            wv = w[rmask].cpu()
             qs = torch.quantile(wv, torch.tensor([.05, .25, .5, .75, .95], device=wv.device))
             metrics["credit_w_mean"] = float(wv.mean())
             metrics["credit_w_std"] = float(wv.std(unbiased=False))
