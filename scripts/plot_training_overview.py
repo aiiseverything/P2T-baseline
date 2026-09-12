@@ -28,7 +28,7 @@ INK_2 = "#52514e"
 MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"]
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7", "#e87ba4"]
 
 
 def load(path):
