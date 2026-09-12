@@ -620,6 +620,13 @@ class VPOTrainer:
                                     "tau": [round(float(t), 4) for t in tau_used],
                                     "w_hist": [int(c) for c in hist.hist],
                                     "bin_width": 0.05}) + "\n")
+            # Per-token credit dump (~0.5 MB/step) for case studies: token ids
+            # live in rollout-N-tokens.json; this adds the direction d_t and
+            # the final weight w_t behind every one of them.
+            torch.save({"w": cache.credit.weight.half().cpu(),
+                        "d": cache.credit.direction.half().cpu(),
+                        "tau": cache.credit.tau_used.cpu()},
+                       Path(self.cfg.output_dir) / f"rollout-{self.rollout_index}-credit.pt")
             # Raw (pre-standardization) utility spread: the p9c scale-mismatch
             # gauge.  Healthy Plan B operation shows ESS well below one while
             # this stays near the p9c value; a return of ESS ~0.998 with this
