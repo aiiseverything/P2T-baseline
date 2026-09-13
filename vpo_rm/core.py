@@ -45,7 +45,9 @@ def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6):
 
 @torch.no_grad()
 def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
-             tau: float, credit_lambda: float = 2.0) -> Credit:
+             tau: float, credit_lambda: float = 2.0,
+             token_ids: Tensor | None = None,
+             freeze_stop_tokens: bool = False) -> Credit:
     """Allocate the sequence advantage over tokens with a scale-free softmax in
     a lambda band.
 
@@ -63,6 +65,12 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     recovers exact GRPO weights, making VPO a one-parameter interpolation
     family over credit concentration.  The adaptive temperature only tightens:
     when the natural softmax at ``tau`` already satisfies the band it is kept.
+
+    freeze_stop_tokens (p10): the RM scores at the last valid position, so
+    d(EOS) carries a ~100x architectural artifact (measured |d| cliff: last
+    position 0.25 vs second-to-last 0.012 vs body 0.001).  When enabled, stop
+    tokens' utility u is zeroed before the softmax, pinning their weight at
+    exactly 1 (same as GRPO) — the credit signal is forced onto content tokens.
     """
     mask = _mask(response_mask)
     if direction.shape != mask.shape or advantage.shape != (mask.shape[0],):
@@ -71,6 +79,8 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         raise ValueError("tau must be finite and positive")
     if not math.isfinite(credit_lambda) or credit_lambda < 1:
         raise ValueError("credit_lambda must be finite and at least one")
+    if freeze_stop_tokens and token_ids is None:
+        raise ValueError("freeze_stop_tokens requires token_ids")
     d = direction.float().masked_fill(~mask, 0)
     a = advantage.float()
     counts = mask.sum(-1, keepdim=True).float()
@@ -86,6 +96,13 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     # allocate by and let the softmax return uniform weights.
     floor = 1e-3 * d.abs().sum(-1, keepdim=True) / counts + torch.finfo(torch.float32).tiny
     u = a[:, None] * (d - mean) / (std + floor)
+
+    if freeze_stop_tokens and token_ids is not None:
+        # 151643 <|endoftext|> and 151645 <|im_end|>: pin to uniform weight.
+        # This removes the scoring-position gradient artifact from the credit.
+        is_stop = (token_ids == 151643) | (token_ids == 151645)
+        u = u.masked_fill(is_stop & mask, 0.0)
+
     if not torch.isfinite(u[mask]).all():
         raise ValueError("Credit utility overflow; inspect advantage and tau")
 
@@ -152,7 +169,8 @@ def guard_degenerate_rewards(rewards: Tensor, lengths: Tensor, group_ids: Tensor
 def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    rm_weight: Tensor, advantage: Tensor, reward_scale: Tensor,
                    response_mask: Tensor, tau: float, token_chunk_size: int = 128,
-                   vocab_chunk_size: int = 8192, credit_lambda: float = 2.0) -> Credit:
+                   vocab_chunk_size: int = 8192, credit_lambda: float = 2.0,
+                   freeze_stop_tokens: bool = False) -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -210,7 +228,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
             pa = (old_logits[r, t, a].float() - log_z).exp()
             va = (f * rm_weight[a].float()).sum(-1)
             direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
-    return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda)
+    return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
+                    token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens)
 
 
 def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor,

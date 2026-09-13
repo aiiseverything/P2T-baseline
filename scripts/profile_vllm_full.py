@@ -48,6 +48,8 @@ def main():
                    help="Dimensionless softmax temperature over standardized credit (Plan B)")
     p.add_argument("--credit-lambda", type=float, default=2.0,
                    help="Credit band: adaptive tau caps any token weight at lambda x uniform")
+    p.add_argument("--freeze-stop-tokens", action="store_true", default=False,
+                   help="Pin stop-token (EOS/im_end) credit weight at exactly 1, removing the RM scoring-position gradient artifact")
     p.add_argument("--beta", type=float, default=0.01, help="KL coefficient")
     p.add_argument("--init-adapter", default="",
                    help="Shared SFT initialization for both arms (stage 0 output)")
@@ -82,6 +84,7 @@ def main():
         microbatch_responses=1, seed=args.seed, smoke=False,
         learning_rate=args.learning_rate, tau=args.tau,
         credit_lambda=args.credit_lambda, beta=args.beta,
+        freeze_stop_tokens=args.freeze_stop_tokens,
         init_adapter=args.init_adapter, kl_reference=args.kl_reference,
         length_penalty_slope=args.length_penalty_slope,
         length_penalty_anchor=args.length_penalty_anchor,

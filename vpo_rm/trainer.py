@@ -84,6 +84,7 @@ class TrainerConfig:
     beta: float = .01
     tau: float = 1.0
     credit_lambda: float = 2.0
+    freeze_stop_tokens: bool = False
     min_response_tokens: int = 8
     degenerate_penalty: float = 1.0
     init_adapter: str = ""
@@ -489,6 +490,7 @@ class VPOTrainer:
             cache = build_credit_cache(old_logits, responses, grads.to(self.actor_device), rm_weight,
                                        advantages.to(self.actor_device), scales.to(self.actor_device),
                                        rmask, self.cfg.tau, credit_lambda=self.cfg.credit_lambda,
+                                       freeze_stop_tokens=self.cfg.freeze_stop_tokens,
                                        token_chunk_size=self.cfg.token_chunk_size,
                                        vocab_chunk_size=self.cfg.vocab_chunk_size)
             phase["credit_cache_sec"] = elapsed_phase(tp)

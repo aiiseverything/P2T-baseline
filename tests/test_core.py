@@ -60,6 +60,36 @@ def test_group_stats_and_zero_advantage():
         group_advantages(torch.tensor([1.]), torch.tensor([0]))
 
 
+def test_freeze_stop_tokens():
+    """EOS-freeze pins stop-token weights at exactly 1 and redistributes the
+    freed credit to the highest-d content token (the artifact 100x cliff is
+    removed; see the p9l2 position-wise |d| measurement)."""
+    torch.manual_seed(11)
+    d = torch.randn(3, 32)
+    a = torch.ones(3)
+    mask = torch.ones(3, 32, dtype=torch.bool)
+    # Put stop tokens at various positions (last, middle, multiple).
+    ids = torch.randint(100, 5000, (3, 32))
+    ids[0, -1] = 151643  # <|endoftext|> at end
+    ids[1, 10] = 151645  # <|im_end|> in middle
+    ids[2, 5] = 151643; ids[2, 20] = 151645  # two stop tokens
+    frozen = allocate(d, a, mask, 1.0, credit_lambda=4.0,
+                      token_ids=ids, freeze_stop_tokens=True)
+    unfrozen = allocate(d, a, mask, 1.0, credit_lambda=4.0)
+    # Stop tokens must be exactly 1 in the frozen version.
+    assert frozen.weight[0, -1] == pytest.approx(1.0, abs=1e-5)
+    assert frozen.weight[1, 10] == pytest.approx(1.0, abs=1e-5)
+    assert frozen.weight[2, 5] == pytest.approx(1.0, abs=1e-5)
+    assert frozen.weight[2, 20] == pytest.approx(1.0, abs=1e-5)
+    # Unfrozen version does NOT pin them (they can be anything but 1 for generic d).
+    assert not all(float(unfrozen.weight[i, j]) == pytest.approx(1.0, abs=1e-6)
+                   for i, j in [(0, -1), (1, 10)])
+    # Sum invariant: both allocate the same total credit.
+    torch.testing.assert_close(frozen.weight.sum(-1), unfrozen.weight.sum(-1))
+    # Advantage mean preserved.
+    torch.testing.assert_close(frozen.advantage.mean(-1), a)
+
+
 def test_entropy_allocation_optimality_for_both_signs():
     torch.manual_seed(5)
     d = torch.randn(2, 6)
