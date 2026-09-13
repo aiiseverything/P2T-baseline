@@ -14,7 +14,9 @@ fi
 
 # EVAL_RUNS: semicolon-separated label=path pairs (rjob-safe, no spaces needed)
 # EVAL_OUT: output dir under runs/
+# EVAL_TEMPS: space-separated temperatures (default "0.7 0.0")
 exec python3 scripts/eval_checkpoints.py \
   ${EVAL_MODEL:+--model "$EVAL_MODEL"} \
   --run "${EVAL_RUNS:?EVAL_RUNS=label=path required}" \
+  --temps ${EVAL_TEMPS:-0.7 0.0} \
   --output "${EVAL_OUT:?EVAL_OUT required}"
