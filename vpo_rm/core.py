@@ -98,8 +98,9 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     u = a[:, None] * (d - mean) / (std + floor)
 
     if freeze_stop_tokens and token_ids is not None:
-        # 151643 <|endoftext|> and 151645 <|im_end|>: pin to uniform weight.
-        # This removes the scoring-position gradient artifact from the credit.
+        # 151643 <|endoftext|> and 151645 <|im_end|>: remove the scoring-position
+        # gradient artifact from the utility BEFORE the softmax/bisection, so
+        # the band solves on the clean content signal.
         is_stop = (token_ids == 151643) | (token_ids == 151645)
         u = u.masked_fill(is_stop & mask, 0.0)
 
@@ -129,6 +130,20 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         tau_used = torch.where(low, tau_used * 2.0, tau_used)
         weight = weights_at(tau_used)
     weight = weight.masked_fill(~mask, 0)
+    # Post-process: pin stop-token weights to exactly 1 (softmax with u=0 does
+    # not guarantee this — other tokens' positive utilities pull mass away).
+    # Then rescale non-stop weights so the per-response mean stays 1.
+    if freeze_stop_tokens and token_ids is not None:
+        is_stop = (token_ids == 151643) | (token_ids == 151645)
+        stop_mask = is_stop & mask
+        nonstop_mask = mask & ~stop_mask
+        n_stop = stop_mask.sum(-1, keepdim=True).float()
+        n_nonstop = nonstop_mask.sum(-1, keepdim=True).float()
+        ns_sum = (weight * nonstop_mask.float()).sum(-1, keepdim=True)
+        scale = n_nonstop / ns_sum.clamp_min(torch.finfo(torch.float32).tiny)
+        scale = torch.where(n_nonstop > 0, scale, torch.ones_like(scale))
+        weight = weight * torch.where(nonstop_mask, scale, torch.ones_like(scale))
+        weight = weight.masked_fill(stop_mask, 1.0)
     return Credit(a[:, None] * weight, d, weight, tau_used)
 
 
