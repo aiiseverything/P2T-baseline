@@ -68,6 +68,13 @@ def _banned_ids(model_path: str) -> dict[int, float]:
     return {i: -100.0 for i in range(vocab_size) if i not in known}
 
 
+def _presence_penalty() -> float:
+    """Matched-conditions eval: PP-trained arms are evaluated with their
+    training-time presence penalty (EVAL_PP env); PP-free arms default to 0."""
+    import os
+    return float(os.environ.get("EVAL_PP", "0.0"))
+
+
 def generate_all(runs, rendered, temps, args):
     """In-process vLLM: one pass over (run, step, temp); returns token-id lists."""
     from vllm import LLM, SamplingParams
@@ -79,7 +86,8 @@ def generate_all(runs, rendered, temps, args):
     params = {t: SamplingParams(temperature=t, top_p=0.9 if t > 0 else 1.0,
                                 max_tokens=args.max_tokens, seed=args.seed,
                                 min_tokens=16, stop_token_ids=[151643, 151645],
-                                logit_bias=_banned_ids(args.model))
+                                logit_bias=_banned_ids(args.model),
+                                presence_penalty=_presence_penalty())
               for t in temps}
     generations = {}
     for label, run_dir in runs:
