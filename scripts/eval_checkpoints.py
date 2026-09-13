@@ -75,6 +75,12 @@ def _presence_penalty() -> float:
     return float(os.environ.get("EVAL_PP", "0.0"))
 
 
+def _top_p() -> float:
+    """EVAL_TOPP overrides the 0.9 default (1.0 replicates training rollouts)."""
+    import os
+    return float(os.environ.get("EVAL_TOPP", "0.9"))
+
+
 def generate_all(runs, rendered, temps, args):
     """In-process vLLM: one pass over (run, step, temp); returns token-id lists."""
     from vllm import LLM, SamplingParams
@@ -83,7 +89,8 @@ def generate_all(runs, rendered, temps, args):
               enable_lora=True, max_lora_rank=64, max_loras=1,
               max_model_len=4096, max_num_seqs=args.max_num_seqs,
               gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed)
-    params = {t: SamplingParams(temperature=t, top_p=0.9 if t > 0 else 1.0,
+    params = {t: SamplingParams(temperature=t,
+                                top_p=1.0 if t == 0 else _top_p(),
                                 max_tokens=args.max_tokens, seed=args.seed,
                                 min_tokens=16, stop_token_ids=[151643, 151645],
                                 logit_bias=_banned_ids(args.model),
