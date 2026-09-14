@@ -10,6 +10,10 @@
 set -euo pipefail
 R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
 cd "$R"
+# Stage: "now" = base + GRPO + p10 arms (checkpoints already on disk),
+#        "p11" = the four p11 sweeps (step-250 appears when training ends),
+#        "all" = everything (default; safe to re-run, idempotent).
+STAGE="${1:-all}"
 IMAGE=registry.h.pjlab.org.cn/ailab/vllm-openai-cu129-nightly-x86_64:latest
 OUTROOT=$R/runs/ifeval-evals
 mkdir -p "$OUTROOT"
@@ -53,23 +57,29 @@ sweep() { # name adapter_root steps...
   submit "$name" $adapters
 }
 
-# --- base model (no LoRA) and baselines: can start immediately ---
-submit ifeval-base "base=none"
-# SFT init (= step-0 for every curve) is covered by the queued ifeval-sft-init job.
+if [ "$STAGE" = "now" ] || [ "$STAGE" = "all" ]; then
+  # --- base model (no LoRA) and baselines: can start immediately ---
+  submit ifeval-base "base=none"
+  # SFT init (= step-0 for every curve) is covered by the queued ifeval-sft-init job.
 
-P10G=runs/formal-skywork-grpo-p10-grpo-baseline2-69550359/vllm-adapters
-sweep ifeval-grpo-p10 "$P10G" 50 100 150 200 250
+  P10G=runs/formal-skywork-grpo-p10-grpo-baseline2-69550359/vllm-adapters
+  sweep ifeval-grpo-p10 "$P10G" 50 100 150 200 250
 
-# --- VPO p10 generation (EOS freeze) ---
-sweep ifeval-p10-lam2eos runs/formal-skywork-vpo_rm-p10-vpo-lam2-0-eosfrz2-71149830-c39f5/vllm-adapters 50 100 150 200 250
-sweep ifeval-p10-lam4eos runs/formal-skywork-vpo_rm-p10-vpo-lam4-0-eosfrz2-72089082-23d54/vllm-adapters 50 100 150 200 250
-sweep ifeval-p10-lam8eos runs/formal-skywork-vpo_rm-p10-vpo-lam8-0-eosfrz2-72959074-c37a8/vllm-adapters 50 100 150 200 250
+  # --- VPO p10 generation (EOS freeze) ---
+  sweep ifeval-p10-lam2eos runs/formal-skywork-vpo_rm-p10-vpo-lam2-0-eosfrz2-71149830-c39f5/vllm-adapters 50 100 150 200 250
+  sweep ifeval-p10-lam4eos runs/formal-skywork-vpo_rm-p10-vpo-lam4-0-eosfrz2-72089082-23d54/vllm-adapters 50 100 150 200 250
+  sweep ifeval-p10-lam8eos runs/formal-skywork-vpo_rm-p10-vpo-lam8-0-eosfrz2-72959074-c37a8/vllm-adapters 50 100 150 200 250
+fi
 
-# --- VPO p11 generation (structural freeze + seed replication) ---
-sweep ifeval-p11-lam2struct runs/formal-skywork-vpo_rm-p11-vpo-lam2-0-struct-56479229-7e9e9/vllm-adapters 50 100 150 200 250
-sweep ifeval-p11-lam4struct runs/formal-skywork-vpo_rm-p11-vpo-lam4-0-struct-57689603-1f5f5/vllm-adapters 50 100 150 200 250
-sweep ifeval-p11-lam8struct runs/formal-skywork-vpo_rm-p11-vpo-lam8-0-struct-58650746-d4780/vllm-adapters 50 100 150 200 250
-sweep ifeval-p11-lam4eos-s43 runs/formal-skywork-vpo_rm-p11-vpo-lam4-eos-seed43-59647788/vllm-adapters 50 100 150 200 250
+if [ "$STAGE" = "p11" ] || [ "$STAGE" = "all" ]; then
+  # --- VPO p11 generation (structural freeze + seed replication) ---
+  # Submit only once step-250 exists for all four arms, or the sweeps miss the
+  # final checkpoint (the cron watcher gates on that).
+  sweep ifeval-p11-lam2struct runs/formal-skywork-vpo_rm-p11-vpo-lam2-0-struct-56479229-7e9e9/vllm-adapters 50 100 150 200 250
+  sweep ifeval-p11-lam4struct runs/formal-skywork-vpo_rm-p11-vpo-lam4-0-struct-57689603-1f5f5/vllm-adapters 50 100 150 200 250
+  sweep ifeval-p11-lam8struct runs/formal-skywork-vpo_rm-p11-vpo-lam8-0-struct-58650746-d4780/vllm-adapters 50 100 150 200 250
+  sweep ifeval-p11-lam4eos-s43 runs/formal-skywork-vpo_rm-p11-vpo-lam4-eos-seed43-59647788/vllm-adapters 50 100 150 200 250
+fi
 
 echo
 echo "=== registered ifeval jobs ==="
