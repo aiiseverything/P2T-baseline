@@ -18,6 +18,8 @@ fi
 # Mode via env var (rjob passes -e cleanly; positional args get mangled)
 # or positional for local runs.
 mode="${SFT_MODE:-${1:-}}"
+SFT_MODEL="${SFT_MODEL:-models/Qwen3-14B-Base}"
+SFT_OUTPUT="${SFT_OUTPUT:-models/sft-init-qwen3-14b-base}"
 case "$mode" in
   smoke)
     # Fast validation pass: a few hundred examples, still exercises rendering,
@@ -28,7 +30,8 @@ case "$mode" in
     # Classmate's sizing: small subset, a couple of epochs — initialization
     # only needs to burn in format/stopping conventions, not peak quality.
     exec python3 scripts/sft_init.py \
+      --model "$SFT_MODEL" \
       --max-examples 10000 --epochs 2 \
-      --output models/sft-init-qwen3-14b-base ;;
+      --output "$SFT_OUTPUT" ;;
   *) echo "unsupported mode: $mode" >&2; exit 2 ;;
 esac

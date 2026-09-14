@@ -17,6 +17,9 @@ if ! python3 -c "import peft, pyarrow" 2>/dev/null; then
     "peft==0.20.0" "pyarrow>=15,<22"
 fi
 MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
+MODEL="${MODEL:-models/Qwen3-14B-Base}"
+RM="${RM:-models/Skywork-Reward-V2-Qwen3-8B}"
+INIT_ADAPTER="${INIT_ADAPTER:-models/sft-init-qwen3-14b-base}"
 # Per-arm overrides: p9h VPO runs at LR=3e-5 (credit concentration acts as a
 # ~10-20x effective-lr multiplier on hot tokens; see vpo坍缩分析-p9g.md).
 LR="${LR:-5e-5}"
@@ -44,14 +47,15 @@ python3 -m pytest tests/test_core.py tests/test_integration.py tests/test_traine
 # bias is lr-insensitive, so the fixes target the reward landscape.
 exec python3 scripts/profile_vllm_full.py \
   --method "$method" \
-  --model models/Qwen3-14B-Base \
+  --model "$MODEL" \
+  --rm "$RM" \
   --learning-rate "$LR" \
   --seed "$SEED" \
   --tau 1.0 \
   --credit-lambda "$CREDIT_LAMBDA" \
   $FREEZE_FLAG \
   --beta 0.03 \
-  --init-adapter models/sft-init-qwen3-14b-base \
+  --init-adapter "$INIT_ADAPTER" \
   --kl-reference init \
   --length-penalty-slope 0.00506 \
   --length-penalty-anchor 600 \
