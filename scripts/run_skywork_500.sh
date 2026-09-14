@@ -21,8 +21,10 @@ MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
 # ~10-20x effective-lr multiplier on hot tokens; see vpo坍缩分析-p9g.md).
 LR="${LR:-5e-5}"
 CREDIT_LAMBDA="${CREDIT_LAMBDA:-2.0}"
+SEED="${SEED:-42}"
 FREEZE_FLAG=""
 [ "${FREEZE_STOP_TOKENS:-0}" = "1" ] && FREEZE_FLAG="--freeze-stop-tokens"
+[ "${FREEZE_STRUCTURAL:-0}" = "1" ] && FREEZE_FLAG="$FREEZE_FLAG --freeze-structural"
 # Present on cloned jobs; rjob injects it only with -e DISTRIBUTED_JOB=true.
 JOB_ID="${JOB_ID:-local-$(date +%Y%m%d%H%M%S)}"; export JOB_ID
 
@@ -44,6 +46,7 @@ exec python3 scripts/profile_vllm_full.py \
   --method "$method" \
   --model models/Qwen3-14B-Base \
   --learning-rate "$LR" \
+  --seed "$SEED" \
   --tau 1.0 \
   --credit-lambda "$CREDIT_LAMBDA" \
   $FREEZE_FLAG \

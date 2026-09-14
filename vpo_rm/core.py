@@ -47,30 +47,17 @@ def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6):
 def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
              tau: float, credit_lambda: float = 2.0,
              token_ids: Tensor | None = None,
-             freeze_stop_tokens: bool = False) -> Credit:
+             freeze_stop_tokens: bool = False,
+             freeze_structural: bool = False) -> Credit:
     """Allocate the sequence advantage over tokens with a scale-free softmax in
     a lambda band.
 
-    Plan B (tau失配与修复方案.md): the direction signal d_t is standardized per
-    response before the softmax, so the temperature is dimensionless; degenerate
-    directions fall back to uniform (plain GRPO) weights, and ``a/sigma``
-    reward-unit normalization cancels exactly.
+    freeze_stop_tokens (p10): pin EOS/im_end weight at 1 (removes the ~100x
+    scoring-position gradient artifact).
 
-    Lambda band (lambda区间带方案.md): credit concentration acts as an
-    effective-lr multiplier on hot tokens (measured 14-19x in p9g, which
-    entropy-collapsed).  A per-response adaptive temperature is solved by
-    bisection so that no token's weight exceeds ``credit_lambda`` times the
-    uniform level (and stays above 1/lambda): the multiplier is capped by
-    construction, smoothly (no clamp discontinuities).  ``credit_lambda = 1``
-    recovers exact GRPO weights, making VPO a one-parameter interpolation
-    family over credit concentration.  The adaptive temperature only tightens:
-    when the natural softmax at ``tau`` already satisfies the band it is kept.
-
-    freeze_stop_tokens (p10): the RM scores at the last valid position, so
-    d(EOS) carries a ~100x architectural artifact (measured |d| cliff: last
-    position 0.25 vs second-to-last 0.012 vs body 0.001).  When enabled, stop
-    tokens' utility u is zeroed before the softmax, pinning their weight at
-    exactly 1 (same as GRPO) — the credit signal is forced onto content tokens.
+    freeze_structural (p11): additionally pin newline and whitespace-only
+    tokens at weight 1 (removes the ~4-9x residual artifact measured after
+    EOS freezing; see the p10 newline |d| analysis).
     """
     mask = _mask(response_mask)
     if direction.shape != mask.shape or advantage.shape != (mask.shape[0],):
@@ -79,8 +66,8 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         raise ValueError("tau must be finite and positive")
     if not math.isfinite(credit_lambda) or credit_lambda < 1:
         raise ValueError("credit_lambda must be finite and at least one")
-    if freeze_stop_tokens and token_ids is None:
-        raise ValueError("freeze_stop_tokens requires token_ids")
+    if (freeze_stop_tokens or freeze_structural) and token_ids is None:
+        raise ValueError("freeze_stop_tokens/freeze_structural requires token_ids")
     d = direction.float().masked_fill(~mask, 0)
     a = advantage.float()
     counts = mask.sum(-1, keepdim=True).float()
@@ -97,12 +84,23 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     floor = 1e-3 * d.abs().sum(-1, keepdim=True) / counts + torch.finfo(torch.float32).tiny
     u = a[:, None] * (d - mean) / (std + floor)
 
-    if freeze_stop_tokens and token_ids is not None:
-        # 151643 <|endoftext|> and 151645 <|im_end|>: remove the scoring-position
-        # gradient artifact from the utility BEFORE the softmax/bisection, so
-        # the band solves on the clean content signal.
+    # Build the freeze mask: stop tokens always; structural tokens optionally.
+    frozen = torch.zeros_like(mask)
+    if token_ids is not None and (freeze_stop_tokens or freeze_structural):
         is_stop = (token_ids == 151643) | (token_ids == 151645)
-        u = u.masked_fill(is_stop & mask, 0.0)
+        frozen = is_stop & mask
+        if freeze_structural:
+            # Newline/whitespace variants (measured 4-9x |d| above content
+            # after EOS freeze; see p10 newline analysis).  Single punctuation
+            # is only ~1.5x and left unfrozen.
+            structural_ids = {198, 271, 143973, 6762,   # \n, \n\n, .\n\n
+                              5687, 147950,              # \n variants
+                              53990, 141437}             # \n\n variants
+            is_struct = torch.zeros_like(is_stop)
+            for sid in structural_ids:
+                is_struct |= (token_ids == sid)
+            frozen = frozen | (is_struct & mask)
+        u = u.masked_fill(frozen, 0.0)
 
     if not torch.isfinite(u[mask]).all():
         raise ValueError("Credit utility overflow; inspect advantage and tau")
@@ -130,20 +128,19 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         tau_used = torch.where(low, tau_used * 2.0, tau_used)
         weight = weights_at(tau_used)
     weight = weight.masked_fill(~mask, 0)
-    # Post-process: pin stop-token weights to exactly 1 (softmax with u=0 does
+    # Post-process: pin frozen-token weights to exactly 1 (softmax with u=0 does
     # not guarantee this — other tokens' positive utilities pull mass away).
-    # Then rescale non-stop weights so the per-response mean stays 1.
-    if freeze_stop_tokens and token_ids is not None:
-        is_stop = (token_ids == 151643) | (token_ids == 151645)
-        stop_mask = is_stop & mask
-        nonstop_mask = mask & ~stop_mask
-        n_stop = stop_mask.sum(-1, keepdim=True).float()
-        n_nonstop = nonstop_mask.sum(-1, keepdim=True).float()
-        ns_sum = (weight * nonstop_mask.float()).sum(-1, keepdim=True)
-        scale = n_nonstop / ns_sum.clamp_min(torch.finfo(torch.float32).tiny)
-        scale = torch.where(n_nonstop > 0, scale, torch.ones_like(scale))
-        weight = weight * torch.where(nonstop_mask, scale, torch.ones_like(scale))
-        weight = weight.masked_fill(stop_mask, 1.0)
+    # Then rescale non-frozen weights so the per-response mean stays 1.
+    if (freeze_stop_tokens or freeze_structural) and token_ids is not None:
+        frozen_mask = frozen  # reuse from pre-softmax computation
+        nonfrozen_mask = mask & ~frozen_mask
+        n_frozen = frozen_mask.sum(-1, keepdim=True).float()
+        n_nonfrozen = nonfrozen_mask.sum(-1, keepdim=True).float()
+        nf_sum = (weight * nonfrozen_mask.float()).sum(-1, keepdim=True)
+        scale = n_nonfrozen / nf_sum.clamp_min(torch.finfo(torch.float32).tiny)
+        scale = torch.where(n_nonfrozen > 0, scale, torch.ones_like(scale))
+        weight = weight * torch.where(nonfrozen_mask, scale, torch.ones_like(scale))
+        weight = weight.masked_fill(frozen_mask, 1.0)
     return Credit(a[:, None] * weight, d, weight, tau_used)
 
 
@@ -185,7 +182,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    rm_weight: Tensor, advantage: Tensor, reward_scale: Tensor,
                    response_mask: Tensor, tau: float, token_chunk_size: int = 128,
                    vocab_chunk_size: int = 8192, credit_lambda: float = 2.0,
-                   freeze_stop_tokens: bool = False) -> Credit:
+                   freeze_stop_tokens: bool = False,
+                   freeze_structural: bool = False) -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -244,7 +242,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
             va = (f * rm_weight[a].float()).sum(-1)
             direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
     return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
-                    token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens)
+                    token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens,
+                    freeze_structural=freeze_structural)
 
 
 def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor,
