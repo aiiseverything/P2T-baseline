@@ -40,7 +40,13 @@ submit() { # name adapter-specs...
     -e "IFEVAL_ADAPTERS=$adapters" \
     -e "IFEVAL_OUT=$OUTROOT/$name" \
     -- bash -exc "bash $R/scripts/run_ifeval.sh" 2>&1 | tail -1
-  sleep 5
+  # rjob registration is async: poll until the showname is visible, otherwise
+  # a re-run of this script sees the job as absent and submits a duplicate
+  # (bit us on 2026-09-15: five duplicate jobs from a 5s sleep).
+  for _ in $(seq 1 12); do
+    rjob list 2>/dev/null | grep -q "showname=$name)" && break
+    sleep 5
+  done
 }
 
 sweep() { # name adapter_root steps...
