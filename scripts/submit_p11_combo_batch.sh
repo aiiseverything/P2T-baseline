@@ -21,8 +21,8 @@ submit() { # name run-label run-path ifeval-adapters
   echo "SUBMIT $name  <-  $path"
   rjob submit --name "$name" --task-type normal --priority 9 --enable-sshd \
     --image "$IMAGE" --image-pull-policy IfNotPresent \
-    --gpu 3 --cpu 32 --memory 400000 \
-    --charged-group ma4agismall_gpu --namespace ailab-ma4agismall \
+    --gpu 3 --cpu 48 --memory 600000 \
+    --charged-group ma4agismall_gpu --private-machine group --namespace ailab-ma4agismall \
     --mount "gpfs://gpfs1/ma4agi-gpu/suminle/interests/VPO-RM:$R" \
     -e "EVAL_RUNS=$label=$R/$path" \
     -e "EVAL_OUT=$R/runs/eval-$name" \

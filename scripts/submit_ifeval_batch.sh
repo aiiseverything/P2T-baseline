@@ -34,8 +34,8 @@ submit() { # name adapter-specs...
   echo "SUBMIT $name  [$adapters]"
   rjob submit --name "$name" --task-type normal --priority 9 --enable-sshd \
     --image "$IMAGE" --image-pull-policy IfNotPresent \
-    --gpu 1 --cpu 16 --memory 64000 \
-    --charged-group ma4agismall_gpu --namespace ailab-ma4agismall \
+    --gpu 1 --cpu 16 --memory 200000 \
+    --charged-group ma4agismall_gpu --private-machine group --namespace ailab-ma4agismall \
     --mount "gpfs://gpfs1/ma4agi-gpu/suminle/interests/VPO-RM:$R" \
     -e "IFEVAL_ADAPTERS=$adapters" \
     -e "IFEVAL_OUT=$OUTROOT/$name" \

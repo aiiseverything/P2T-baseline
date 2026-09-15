@@ -153,7 +153,19 @@ def run_selftest(args) -> None:
             raise AssertionError(f"adapters {bad} should have been rejected")
     assert parse_adapters(["base=none", "step-50=/abs/path"])[0][1] == "none"
     assert parse_adapters(["a=x", "b=y"])[1] == ("b", "y")
-    print("selftest OK")
+    # When vLLM is importable (i.e. inside the job image), verify the recipes
+    # actually construct — catches API drift like top_k=None being rejected.
+    try:
+        from vllm import SamplingParams
+    except ImportError:
+        print("selftest OK (no vllm; recipe construction not checked)")
+        return
+    for spec in ["0.0:1:1.0:-1", "0.7:5:0.8:20", "1.0:1:1.0:-1"]:
+        recipe = parse_recipe(spec)
+        SamplingParams(temperature=recipe["temp"], top_p=recipe["top_p"],
+                       top_k=recipe["top_k"], n=recipe["n"], max_tokens=16,
+                       stop_token_ids=[151643, 151645])
+    print("selftest OK (recipes construct under installed vLLM)")
 
 
 def main():
@@ -225,7 +237,7 @@ def main():
                 continue
             params = SamplingParams(
                 temperature=recipe["temp"], top_p=recipe["top_p"],
-                top_k=None if recipe["top_k"] == -1 else recipe["top_k"],
+                top_k=recipe["top_k"],
                 n=recipe["n"], max_tokens=args.max_tokens, seed=args.seed,
                 stop_token_ids=[151643, 151645], logit_bias=banned)
             outputs = llm.generate(rendered, params, lora_request=lora)

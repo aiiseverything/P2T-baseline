@@ -21,7 +21,7 @@ submit() { # entry name gpus cpu mem [ENV=VAL...]
   rjob submit --name "$name" --task-type normal --priority 9 --enable-sshd \
     --image "$IMAGE" --image-pull-policy IfNotPresent \
     --gpu "$gpus" --cpu "$cpu" --memory "$mem" \
-    --charged-group ma4agismall_gpu --namespace ailab-ma4agismall \
+    --charged-group ma4agismall_gpu --private-machine group --namespace ailab-ma4agismall \
     --mount "gpfs://gpfs1/ma4agi-gpu/suminle/interests/VPO-RM:$R" \
     "${env_args[@]}" \
     -- bash -exc "bash $R/scripts/$entry" 2>&1 | tail -1
@@ -41,7 +41,7 @@ CALIB=runs/rm4b-calib
 VPO_ENV="CREDIT_LAMBDA=4.0 FREEZE_STOP_TOKENS=1 FREEZE_STRUCTURAL=1"
 
 # --- prerequisites ---
-submit run_sft_init.sh sft-init-8b 1 16 64000 \
+submit run_sft_init.sh sft-init-8b 1 16 200000 \
   "SFT_MODE=full" "SFT_MODEL=$R/$B8" "SFT_OUTPUT=$R/$S8"
 submit run_rm_calib.sh calib-rm4b 3 48 600000 \
   "CALIB_MODEL=$R/$B14" "CALIB_RM=$R/$RM4" "CALIB_OUT=$R/$CALIB" "CALIB_INIT=$R/$S14"
