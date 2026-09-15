@@ -230,6 +230,12 @@ def main():
                 "n_problems": len(data),
                 "details": details,
             }, indent=1, ensure_ascii=False))
+            (tag_dir / f"generations_{rectag}.jsonl").write_text("\n".join(json.dumps({
+                "idx": j, "question": data[j]["question"],
+                "gold": golds[j],
+                "responses": [outputs[j].outputs[s].text for s in range(n_actual)],
+                "response_tokens": tokens_by_prompt[j],
+            }) for j in range(len(data))))
             print(f"  Saved to {result_path}", flush=True)
 
     print("\nDone.")
