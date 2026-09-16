@@ -286,12 +286,19 @@ class VPOTrainer:
             sub = {k: v[prompt_idx:prompt_idx + 1] for k, v in batch.items()}
             for group_start in range(0, self.cfg.group_size, generation_mb):
                 n = min(generation_mb, self.cfg.group_size - group_start)
+                # stop at BOTH end tokens: base generation_config only lists
+                # <|endoftext|>, but SFT teaches <|im_end|> — without this the
+                # rollout continues past the answer end (2026-09-16 audit).
+                gen_stop_ids = [i for i in (self.actor_tokenizer.eos_token_id,
+                                             self.actor_tokenizer.convert_tokens_to_ids("<|im_end|>"))
+                                if isinstance(i, int) and i >= 0]
                 generated = self.actor.generate(
                     **sub, do_sample=True, temperature=self.cfg.temperature,
                     top_p=self.cfg.top_p, top_k=self.cfg.top_k,
                     max_new_tokens=self.cfg.max_response_tokens,
                     min_new_tokens=self.cfg.min_response_tokens,
                     num_return_sequences=n,
+                    eos_token_id=gen_stop_ids,
                     pad_token_id=self.actor_tokenizer.pad_token_id,
                     return_dict_in_generate=False)
                 response_chunks.append(generated[:, prompt_width:])

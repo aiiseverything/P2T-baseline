@@ -217,7 +217,7 @@ def main():
             mean_len = sum(sum(l) / len(l) for l in tokens_by_prompt) / len(tokens_by_prompt)
 
             print(f"\n{'=' * 50}")
-            print(f"  GSM8K [{tag} / {rectag}] — adapter: {path}")
+            print(f"  GSM8K [{tag} / {rectag}] max_tokens={args.max_tokens} — adapter: {path}")
             print(f"  accuracy: {acc:.4f} (mean@{n_actual}; per-sample "
                   f"{', '.join(f'{a:.3f}' for a in per_sample_acc)})")
             print(f"  response length mean={mean_len:.0f} tokens")
@@ -225,6 +225,7 @@ def main():
             result_path.write_text(json.dumps({
                 "adapter": str(path), "tag": tag,
                 "recipe": recipe, "seed": args.seed,
+                "max_tokens": args.max_tokens,
                 "accuracy": acc, "per_sample": per_sample_acc,
                 "response_length_mean": mean_len,
                 "n_problems": len(data),

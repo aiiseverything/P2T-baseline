@@ -20,5 +20,6 @@ RECIPES="${GSM8K_RECIPES:-1.0:1:1.0:-1}"
 
 exec python3 scripts/eval_gsm8k.py \
   --output "${GSM8K_OUT:?required}" \
+  --max-tokens "${GSM8K_MAX_TOKENS:-1024}" \
   --recipes $RECIPES \
   --adapters $ADAPTERS
