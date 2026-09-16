@@ -24,12 +24,19 @@ def _mask(mask: Tensor) -> Tensor:
 
 
 @torch.no_grad()
-def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6):
-    """Population std + eps; supply whole prompt groups, including across ranks."""
+def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6,
+                     *, std_floor: float = 0.):
+    """Group advantages using std+eps, or max(std, a positive fixed floor).
+
+    Supply complete prompt groups, including across ranks. A positive floor
+    replaces the additive epsilon; zero preserves the original normalization.
+    """
     if rewards.ndim != 1 or group_ids.shape != rewards.shape:
         raise ValueError("rewards and group_ids must have shape [B]")
     if eps <= 0 or not torch.isfinite(rewards).all():
         raise ValueError("Rewards must be finite and eps positive")
+    if not math.isfinite(std_floor) or std_floor < 0:
+        raise ValueError("std_floor must be finite and nonnegative")
     rewards = rewards.float()
     advantage, scale = torch.empty_like(rewards), torch.empty_like(rewards)
     for group in group_ids.unique():
@@ -37,7 +44,8 @@ def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6):
         r = rewards[selected]
         if r.numel() < 2:
             raise ValueError("Each complete prompt group must contain at least two responses")
-        std = r.std(correction=0) + eps
+        std = r.std(correction=0)
+        std = std.clamp_min(std_floor) if std_floor > 0 else std + eps
         advantage[selected] = (r - r.mean()) / std
         scale[selected] = std
     return advantage, scale
@@ -48,100 +56,113 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
              tau: float, credit_lambda: float = 2.0,
              token_ids: Tensor | None = None,
              freeze_stop_tokens: bool = False,
-             freeze_structural: bool = False) -> Credit:
-    """Allocate the sequence advantage over tokens with a scale-free softmax in
-    a lambda band.
+             freeze_structural: bool = False,
+             stop_token_ids: tuple[int, ...] | None = None,
+             structural_token_ids: tuple[int, ...] | None = None) -> Credit:
+    """Allocate advantage within the final [1/lambda, lambda] weight band.
 
-    freeze_stop_tokens (p10): pin EOS/im_end weight at 1 (removes the ~100x
-    scoring-position gradient artifact).
-
-    freeze_structural (p11): additionally pin newline and whitespace-only
-    tokens at weight 1 (removes the ~4-9x residual artifact measured after
-    EOS freezing; see the p10 newline |d| analysis).
+    Frozen positions receive exactly one unit of credit. Standardization and
+    softmax use only the remaining positions, whose budget is their count.
+    Structural freezing requires IDs verified against the actual tokenizer.
+    The default stop IDs only preserve direct callers using the Qwen vocabulary;
+    production callers should pass both sets from ``token_policy``.
     """
     mask = _mask(response_mask)
     if direction.shape != mask.shape or advantage.shape != (mask.shape[0],):
         raise ValueError("Expected direction [B, T] and advantage [B]")
-    if not math.isfinite(tau) or tau <= 0:
-        raise ValueError("tau must be finite and positive")
+    if any(x.device != direction.device for x in (advantage, mask)):
+        raise ValueError("Credit tensors must be on the same device")
+    if not math.isfinite(tau) or tau <= 0 or tau > torch.finfo(torch.float32).max:
+        raise ValueError("tau must be finite, positive and representable in float32")
     if not math.isfinite(credit_lambda) or credit_lambda < 1:
         raise ValueError("credit_lambda must be finite and at least one")
-    if (freeze_stop_tokens or freeze_structural) and token_ids is None:
-        raise ValueError("freeze_stop_tokens/freeze_structural requires token_ids")
+    if freeze_stop_tokens or freeze_structural:
+        if token_ids is None:
+            raise ValueError("freeze_stop_tokens/freeze_structural requires token_ids")
+        if token_ids.shape != mask.shape or token_ids.dtype != torch.long or token_ids.device != mask.device:
+            raise ValueError("token_ids must be int64 [B,T] on the credit device")
+    if freeze_structural and structural_token_ids is None:
+        raise ValueError("freeze_structural requires verified structural_token_ids")
     d = direction.float().masked_fill(~mask, 0)
     a = advantage.float()
-    counts = mask.sum(-1, keepdim=True).float()
-    ones = torch.ones_like(a)
-    if credit_lambda <= 1.0:
-        weight = torch.ones_like(d) * counts / counts
-        return Credit(a[:, None] * weight, d, weight, ones * tau)
-    mean = d.sum(-1, keepdim=True) / counts
-    var = d.square().sum(-1, keepdim=True) / counts - mean.square()
-    std = var.clamp_min(0).sqrt()
-    # Relative floor: if the spread is below 0.1% of the typical magnitude the
-    # signal is numerical noise; treat the response as having nothing to
-    # allocate by and let the softmax return uniform weights.
-    floor = 1e-3 * d.abs().sum(-1, keepdim=True) / counts + torch.finfo(torch.float32).tiny
-    u = a[:, None] * (d - mean) / (std + floor)
+    if not torch.isfinite(d).all() or not torch.isfinite(a).all():
+        raise ValueError("Valid credit directions and advantages must be finite")
+    tau_used = torch.full_like(a, max(tau, torch.finfo(torch.float32).tiny))
+    # A band narrower than float32's resolution only admits the exactly
+    # uniform representable solution; do not search towards overflowing tau.
+    if credit_lambda - 1.0 < torch.finfo(torch.float32).eps:
+        weight = mask.float()
+        return Credit(a[:, None] * weight, d, weight, tau_used)
 
-    # Build the freeze mask: stop tokens always; structural tokens optionally.
     frozen = torch.zeros_like(mask)
-    if token_ids is not None and (freeze_stop_tokens or freeze_structural):
-        is_stop = (token_ids == 151643) | (token_ids == 151645)
-        frozen = is_stop & mask
-        if freeze_structural:
-            # Newline/whitespace variants (measured 4-9x |d| above content
-            # after EOS freeze; see p10 newline analysis).  Single punctuation
-            # is only ~1.5x and left unfrozen.
-            structural_ids = {198, 271, 143973, 6762,   # \n, \n\n, .\n\n
-                              5687, 147950,              # \n variants
-                              53990, 141437}             # \n\n variants
-            is_struct = torch.zeros_like(is_stop)
-            for sid in structural_ids:
-                is_struct |= (token_ids == sid)
-            frozen = frozen | (is_struct & mask)
-        u = u.masked_fill(frozen, 0.0)
+    if freeze_stop_tokens or freeze_structural:
+        stop_ids = (151643, 151645) if stop_token_ids is None else stop_token_ids
+        ids = tuple(stop_ids) + (tuple(structural_token_ids) if freeze_structural else ())
+        if ids:
+            frozen = torch.isin(token_ids, torch.as_tensor(ids, device=mask.device)) & mask
+    free = mask & ~frozen
+    counts = free.sum(-1, keepdim=True).float()
+    divisor = counts.clamp_min(1)
+    # Scaling before the centered variance avoids both square overflow and
+    # catastrophic cancellation for almost-constant direction values.
+    free_d = d.masked_fill(~free, 0)
+    magnitude = free_d.abs().amax(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+    scaled = free_d / magnitude
+    mean = scaled.sum(-1, keepdim=True) / divisor
+    centered = (scaled - mean).masked_fill(~free, 0)
+    std = (centered.square().sum(-1, keepdim=True) / divisor).sqrt()
+    floor = 1e-3 * scaled.abs().sum(-1, keepdim=True) / divisor + torch.finfo(torch.float32).tiny
+    u = a[:, None] * (centered / (std + floor))
+    if not torch.isfinite(u).all():
+        raise ValueError("Credit utility overflow; inspect advantage")
+    uniform = (u == 0).all(-1)
+    maximum = u.masked_fill(~free, -torch.inf).amax(-1, keepdim=True)
+    maximum = maximum.masked_fill(counts == 0, 0)
+    shifted = u - maximum
 
-    if not torch.isfinite(u[mask]).all():
-        raise ValueError("Credit utility overflow; inspect advantage and tau")
+    def weights_at(temperature):
+        # Subtract max before division so tiny temperatures can only produce
+        # harmless negative infinity, never positive-infinity softmax NaNs.
+        z = (shifted / temperature[:, None]).masked_fill(~free, -torch.inf)
+        z = z.masked_fill(counts == 0, 0)
+        weight = (z.softmax(-1) * counts).masked_fill(~free, 0)
+        weight = weight.masked_fill(frozen, 1.)
+        return torch.where(uniform[:, None], mask.float(), weight)
 
-    def weights_at(tau_per_response):
-        q = (u / tau_per_response[:, None]).masked_fill(~mask, -torch.inf).softmax(-1)
-        return q * counts
+    def feasible(weight):
+        return ((weight.max(-1).values <= credit_lambda)
+                & (weight.masked_fill(~mask, torch.inf).min(-1).values >= 1. / credit_lambda)
+                & torch.isfinite(weight).all(-1))
 
-    # Bisection in log space for the minimum tau satisfying max(w) <= lambda.
-    log_lo = torch.full_like(a, math.log(1e-2))
-    log_hi = torch.full_like(a, math.log(1e2))
-    for _ in range(40):
-        log_mid = (log_lo + log_hi) / 2
-        over = weights_at(torch.exp(log_mid)).max(-1).values > credit_lambda
-        log_lo = torch.where(over, log_mid, log_lo)
-        log_hi = torch.where(over, log_hi, log_mid)
-    tau_used = torch.maximum(torch.exp(log_hi), torch.as_tensor(tau, device=a.device))
+    # Bracket an actually feasible temperature. A fixed upper endpoint misses
+    # legal long-response outliers; both sides of the band must be checked.
+    lower = tau_used.clone()
+    upper = tau_used.clone()
+    needs_raise = ~feasible(weights_at(upper))
+    search = needs_raise.clone()
+    while bool(needs_raise.any()):
+        doubled = upper * 2.
+        if not torch.isfinite(doubled[needs_raise]).all():
+            raise ValueError("Credit temperature overflow before a feasible band was found")
+        lower = torch.where(needs_raise, upper, lower)
+        upper = torch.where(needs_raise, doubled, upper)
+        needs_raise = ~feasible(weights_at(upper))
+    if bool(search.any()):
+        for _ in range(40):
+            middle = lower + (upper - lower) / 2.
+            accepted = feasible(weights_at(middle))
+            upper = torch.where(search & accepted, middle, upper)
+            lower = torch.where(search & ~accepted, middle, lower)
+    tau_used = upper
     weight = weights_at(tau_used)
-    # The lower band (w >= 1/lambda) binds only for extreme negative outliers;
-    # flattening further restores it at the cost of a looser upper band.
-    for _ in range(8):
-        low = weight.masked_fill(~mask, torch.inf).min(-1).values < 1.0 / credit_lambda
-        if not bool(low.any()):
-            break
-        tau_used = torch.where(low, tau_used * 2.0, tau_used)
-        weight = weights_at(tau_used)
-    weight = weight.masked_fill(~mask, 0)
-    # Post-process: pin frozen-token weights to exactly 1 (softmax with u=0 does
-    # not guarantee this — other tokens' positive utilities pull mass away).
-    # Then rescale non-frozen weights so the per-response mean stays 1.
-    if (freeze_stop_tokens or freeze_structural) and token_ids is not None:
-        frozen_mask = frozen  # reuse from pre-softmax computation
-        nonfrozen_mask = mask & ~frozen_mask
-        n_frozen = frozen_mask.sum(-1, keepdim=True).float()
-        n_nonfrozen = nonfrozen_mask.sum(-1, keepdim=True).float()
-        nf_sum = (weight * nonfrozen_mask.float()).sum(-1, keepdim=True)
-        scale = n_nonfrozen / nf_sum.clamp_min(torch.finfo(torch.float32).tiny)
-        scale = torch.where(n_nonfrozen > 0, scale, torch.ones_like(scale))
-        weight = weight * torch.where(nonfrozen_mask, scale, torch.ones_like(scale))
-        weight = weight.masked_fill(frozen_mask, 1.0)
-    return Credit(a[:, None] * weight, d, weight, tau_used)
+    if not bool(feasible(weight).all()):
+        raise ValueError("Final credit weights violate the lambda band")
+    if not torch.allclose(weight.sum(-1), mask.sum(-1).float(), rtol=2e-6, atol=2e-6):
+        raise ValueError("Final credit weights do not preserve the response budget")
+    token_advantage = a[:, None] * weight
+    if not torch.isfinite(token_advantage).all():
+        raise ValueError("Token advantage overflow")
+    return Credit(token_advantage, d, weight, tau_used)
 
 
 @torch.no_grad()
@@ -183,7 +204,10 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    response_mask: Tensor, tau: float, token_chunk_size: int = 128,
                    vocab_chunk_size: int = 8192, credit_lambda: float = 2.0,
                    freeze_stop_tokens: bool = False,
-                   freeze_structural: bool = False) -> Credit:
+                   freeze_structural: bool = False,
+                   stop_token_ids: tuple[int, ...] | None = None,
+                   structural_token_ids: tuple[int, ...] | None = None,
+                   policy_temperature: float = 1.0) -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -191,6 +215,7 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
     rm_weight [V,D] uses precisely the Actor output token-ID ordering.
     Temporary vocabulary tensors are at most token_chunk_size*vocab_chunk_size.
     The caller supplies the complete logits and an unsharded embedding weight.
+    Sampling temperature is applied after each block's float32 conversion.
     """
     mask = _mask(response_mask)
     if old_logits.ndim != 3 or old_logits.shape[:2] != mask.shape:
@@ -206,6 +231,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
         raise ValueError("advantage and reward_scale must have shape [B]")
     if token_chunk_size < 1 or vocab_chunk_size < 1:
         raise ValueError("Chunk sizes must be positive")
+    if not math.isfinite(policy_temperature) or policy_temperature <= 0:
+        raise ValueError("policy_temperature must be finite and positive")
     tensors = (token_ids, input_grads, rm_weight, advantage, reward_scale, mask)
     if any(x.device != old_logits.device for x in tensors):
         raise ValueError("Credit tensors must be on the same device")
@@ -228,22 +255,23 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
             f = input_grads[r, t].float()
             log_z = torch.full((r.numel(),), -torch.inf, device=r.device)
             for lo in range(0, V, vocab_chunk_size):
-                z = old_logits[r, t, lo:lo + vocab_chunk_size].float()
+                z = old_logits[r, t, lo:lo + vocab_chunk_size].float() / policy_temperature
                 log_z = torch.logaddexp(log_z, z.logsumexp(-1))
             mu, p2, p2v = (torch.zeros_like(log_z) for _ in range(3))
             for lo in range(0, V, vocab_chunk_size):
-                z = old_logits[r, t, lo:lo + vocab_chunk_size].float()
+                z = old_logits[r, t, lo:lo + vocab_chunk_size].float() / policy_temperature
                 p = (z - log_z[:, None]).exp()
                 v = f @ rm_weight[lo:lo + vocab_chunk_size].float().T
                 mu += (p * v).sum(-1)
                 p2 += p.square().sum(-1)
                 p2v += (p.square() * v).sum(-1)
-            pa = (old_logits[r, t, a].float() - log_z).exp()
+            pa = (old_logits[r, t, a].float() / policy_temperature - log_z).exp()
             va = (f * rm_weight[a].float()).sum(-1)
             direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
     return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
                     token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens,
-                    freeze_structural=freeze_structural)
+                    freeze_structural=freeze_structural,
+                    stop_token_ids=stop_token_ids, structural_token_ids=structural_token_ids)
 
 
 def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor,
@@ -260,7 +288,23 @@ def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor
     # Mask before exponentiation so padded NaNs cannot affect backward.
     log_ratio = (new_logp.float().masked_fill(~mask, 0)
                  - old_logp.detach().float().masked_fill(~mask, 0))
-    ratio = log_ratio.exp()
     a = token_advantage.detach().float().masked_fill(~mask, 0)
-    objective = torch.minimum(ratio * a, ratio.clamp(1-clip_eps, 1+clip_eps) * a)
-    return -(objective.sum(-1) / mask.sum(-1)).mean()
+    if not torch.isfinite(log_ratio).all() or not torch.isfinite(a).all():
+        raise ValueError("Valid log probabilities and token advantages must be finite")
+    # For positive A, min(ratio, 1+eps) is clipped in log space *before*
+    # exponentiation. Computing exp first gives 0*inf=NaN in backward even
+    # when the selected clipped objective is finite. Negative A uses max.
+    selected_log_ratio = torch.where(
+        a >= 0, log_ratio.clamp(max=math.log1p(clip_eps)),
+        log_ratio.clamp(min=math.log1p(-clip_eps)))
+    selected_log_ratio = selected_log_ratio.masked_fill(a == 0, 0)
+    # Combine the advantage scale before exp: even an overflowing raw ratio
+    # may have a representable objective and gradient when |A| is tiny.
+    log_scale = a.abs().masked_fill(a == 0, 1).log()
+    objective = a.sign() * (selected_log_ratio + log_scale).exp()
+    if not torch.isfinite(objective).all():
+        raise ValueError("Policy objective overflow; gradients would not be finite")
+    loss = -(objective / mask.sum(-1, keepdim=True)).mean(0).sum()
+    if not torch.isfinite(loss):
+        raise ValueError("Policy loss overflow")
+    return loss

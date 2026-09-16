@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$R:$R/.vllm-extra:$R/third_party/ifeval"
 export NLTK_DATA="$R/third_party/ifeval/nltk_data"
@@ -34,6 +34,7 @@ fi
 RECIPES="${IFEVAL_RECIPES:-1.0:1:1.0:-1}"
 
 exec python3 scripts/eval_ifeval.py \
+  --model "${IFEVAL_MODEL:-${EVAL_MODEL:-models/Qwen3-14B-Base}}" \
   --output "${IFEVAL_OUT:?required}" \
   --recipes $RECIPES \
   ${ADAPTERS:+--adapters $ADAPTERS}

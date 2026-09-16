@@ -16,8 +16,8 @@
 #                    DONE); waited for up to CHAIN_WAIT_HOURS (default 12)
 #   LR / CREDIT_LAMBDA / FREEZE_STOP_TOKENS / FREEZE_STRUCTURAL / SEED /
 #   MAX_ROLLOUTS   pass through to run_skywork_500.sh
-set -uo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+set -euo pipefail
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 CHAIN_NAME="${CHAIN_NAME:?required}"
 CHAIN_METHOD="${CHAIN_METHOD:?grpo|vpo_rm}"
@@ -60,6 +60,7 @@ for s in 50 100 150 200 250; do
     adapters="$adapters step-$s=$R/$RUN_DIR/vllm-adapters/step-$s"
 done
 
+EVAL_MODEL="$CHAIN_MODEL" EVAL_RM="$CHAIN_RM" IFEVAL_MODEL="$CHAIN_MODEL" \
 EVAL_RUNS="$CHAIN_NAME=$R/$RUN_DIR" \
 EVAL_OUT="$R/runs/eval-$CHAIN_NAME" \
 IFEVAL_ADAPTERS="$adapters" \

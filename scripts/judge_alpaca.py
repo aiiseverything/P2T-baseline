@@ -15,14 +15,19 @@ Runs off-cluster (networked machine):
 
 Env:
   LINKAPI_KEY    API key (or --key-file, default /root/.linkapi_key)
-Cost guard: reads the relay's usage endpoint; aborts before exceeding
---budget-cny (default 90; usage endpoint unit = 0.01 RMB, verified empirically).
+Cost guard: checks relay usage before each bounded batch and stops dispatch at
+--budget-cny (default 90; unit = 0.01 RMB). In-flight requests and delayed billing
+can exceed the threshold; this is a dispatch guard, not a hard prepaid spending cap.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import math
+import os
+import re
+from datetime import datetime, timezone
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.eval_artifacts import atomic_text, cache_matches, commit_cache, digest, file_hash
 
 TEMPLATE_PATH = Path("/root/.venvs/alpacaeval/lib/python3.13/site-packages/"
                      "alpaca_eval/evaluators_configs/alpaca_eval_clf_gpt4_turbo/"
@@ -56,6 +62,12 @@ def to_chat_messages(filled: str):
     return msgs or [{"role": "user", "content": filled}]
 
 
+def fill_template(template: str, instruction: str, output_1: str, output_2: str) -> str:
+    """Substitute each template slot once, leaving inserted text byte-for-byte intact."""
+    values = {'{instruction}': instruction, '{output_1}': output_1, '{output_2}': output_2}
+    return re.sub(r'\{(?:instruction|output_[12])\}', lambda match: values[match.group()], template)
+
+
 def order_switch(instruction: str) -> bool:
     """Deterministic per-instruction swap: candidate is output_2 ('M') iff True.
     Same instruction -> same order for every tag (comparable across arms)."""
@@ -76,7 +88,24 @@ def preference_from_logprobs(top_logprobs) -> float | None:
     import math
     lm = lp.get("m", -100.0)
     lM = lp.get("M", -100.0)
-    return math.exp(lm) / (math.exp(lm) + math.exp(lM))
+    scale = max(lm, lM)
+    return math.exp(lm - scale) / (math.exp(lm - scale) + math.exp(lM - scale))
+
+
+def validate_references(refs):
+    """Validate official or overlap-filtered reference subsets."""
+    if not isinstance(refs, list) or not refs:
+        raise ValueError('reference dataset must be nonempty')
+    by_instruction = {}
+    for row in refs:
+        if (not isinstance(row, dict) or not isinstance(row.get('instruction'), str)
+                or not row['instruction'] or not isinstance(row.get('reference_output'), str)
+                or not row['reference_output']):
+            raise ValueError('each reference needs nonempty instruction and reference_output fields')
+        if row['instruction'] in by_instruction:
+            raise ValueError('duplicate reference instructions')
+        by_instruction[row['instruction']] = row
+    return by_instruction
 
 
 class Relay:
@@ -85,24 +114,38 @@ class Relay:
         self.client = httpx.Client(timeout=90,
                                    headers={"Authorization": f"Bearer {key}"},
                                    limits=httpx.Limits(max_connections=16))
+        if not math.isfinite(budget_cny) or budget_cny <= 0:
+            raise ValueError('budget_cny must be finite and positive')
         self.budget_cny = budget_cny
+        self.usage_start = datetime.now(timezone.utc).date().replace(day=1).isoformat()
         self.usage0 = self.usage()
 
     def usage(self) -> float:
         """Total spent on this key, in RMB (endpoint unit = 0.01 RMB)."""
-        for _ in range(3):
+        last = None
+        for attempt in range(3):
             try:
-                r = self.client.get(
+                response = self.client.get(
                     f"{BASE_URL}/dashboard/billing/usage",
-                    params={"start_date": "2026-09-01", "end_date": "2026-09-16"}).json()
-                return float(r.get("total_usage", 0.0)) / 100.0
-            except Exception:
-                time.sleep(2)
-        return -1.0
+                    params={"start_date": self.usage_start,
+                            "end_date": datetime.now(timezone.utc).date().isoformat()})
+                response.raise_for_status()
+                payload = response.json()
+                amount = float(payload["total_usage"])
+                if "error" in payload or not math.isfinite(amount) or amount < 0:
+                    raise ValueError('invalid usage response')
+                return amount / 100.0
+            except Exception as error:
+                last = error
+                if attempt < 2:
+                    time.sleep(2)
+        raise RuntimeError(f'Cannot verify usage; judge dispatch stopped: {last}')
 
     def spent_since_start(self) -> float:
-        u = self.usage()
-        return -1.0 if u < 0 else u - self.usage0
+        spent = self.usage() - self.usage0
+        if spent < -1e-6:
+            raise RuntimeError('Usage counter decreased; cannot verify budget')
+        return max(0.0, spent)
 
     def judge_call(self, messages) -> tuple[float | None, dict]:
         body = {"model": JUDGE_MODEL, "messages": messages, "max_tokens": 1,
@@ -110,7 +153,9 @@ class Relay:
         last = None
         for attempt in range(5):
             try:
-                r = self.client.post(f"{BASE_URL}/chat/completions", json=body).json()
+                response = self.client.post(f"{BASE_URL}/chat/completions", json=body)
+                response.raise_for_status()
+                r = response.json()
                 if "error" in r:
                     raise RuntimeError(r["error"])
                 ch = r["choices"][0]
@@ -123,59 +168,123 @@ class Relay:
         raise RuntimeError(f"judge call failed after retries: {last}")
 
 
+def candidate_rows(gens_path, refs, limit=None):
+    rows = [json.loads(line) for line in Path(gens_path).read_text().splitlines() if line.strip()]
+    by_instruction = validate_references(refs)
+    if limit:
+        wanted = {r['instruction'] for r in refs[:limit]}
+        rows = [r for r in rows if r['instruction'] in wanted]
+    else:
+        wanted = set(by_instruction)
+    keys = [(r['instruction'], r.get('sample_idx', 0)) for r in rows]
+    sample_sets = {instruction: set() for instruction in wanted}
+    for instruction, sample in keys:
+        if instruction not in wanted or not isinstance(sample, int) or sample < 0:
+            raise ValueError('invalid candidate coverage/sample index')
+        sample_sets[instruction].add(sample)
+    n_samples = max((s for _, s in keys), default=-1) + 1
+    if (not rows or len(set(keys)) != len(keys) or
+            any(indices != set(range(n_samples)) for indices in sample_sets.values())):
+        raise ValueError('candidate coverage must include each reference and every sample exactly once')
+    return rows, by_instruction
+
+
+def validated_checkpoint_records(saved, protocol, rows):
+    """Validate resumable annotations before trusting them as completed work."""
+    if not isinstance(saved, dict) or saved.get('protocol') != protocol:
+        raise ValueError('judge checkpoint protocol mismatch')
+    records = saved.get('rows')
+    if not isinstance(records, dict):
+        raise ValueError('judge checkpoint rows are invalid')
+    expected = {digest(row): row for row in rows}
+    if any(key not in expected for key in records):
+        raise ValueError('judge checkpoint contains unknown rows')
+    for key, record in records.items():
+        row = expected[key]
+        preference = record.get('preference') if isinstance(record, dict) else None
+        valid_preference = preference is None or (
+            isinstance(preference, (int, float)) and not isinstance(preference, bool)
+            and math.isfinite(preference) and 0 <= preference <= 1
+        )
+        if (not isinstance(record, dict) or not valid_preference
+                or record.get('instruction') != row['instruction']
+                or record.get('sample_idx') != row.get('sample_idx', 0)
+                or not isinstance(record.get('chars'), int)
+                or isinstance(record.get('chars'), bool) or record['chars'] < 0
+                or not isinstance(record.get('usage'), dict)):
+            raise ValueError('judge checkpoint contains an invalid annotation')
+    return records
+
+
+def judge_result_config(gen_path, refs, template, limit, generation_file):
+    """Identity of one complete judging result and its selected generation recipe."""
+    return {'generation_sha256': file_hash(gen_path), 'generation_file': generation_file,
+            'refs': digest(refs), 'template': digest(template),
+            'judge': JUDGE_MODEL, 'limit': limit,
+            'source_sha256': file_hash(__file__)}
+
+
 def judge_tag(tag: str, gens_path: Path, refs: list[dict], template: str,
               relay: Relay, limit: int | None, workers: int) -> dict:
-    rows = [json.loads(l) for l in open(gens_path)]
-    if limit:
-        rows = rows[:limit]
-    by_instr = {r["instruction"]: r for r in refs}
+    if workers < 1:
+        raise ValueError('workers must be positive')
+    rows, by_instr = candidate_rows(gens_path, refs, limit)
+    protocol = digest({'rows': rows, 'refs': refs, 'template': template,
+                       'judge': JUDGE_MODEL, 'protocol': 'md5-order-logprob-v2', 'source': file_hash(__file__)})
+    checkpoint = Path(gens_path).with_name(f'annotations_{protocol[:16]}.json')
+    saved = json.loads(checkpoint.read_text()) if checkpoint.exists() else {'protocol': protocol, 'rows': {}}
+    records = validated_checkpoint_records(saved, protocol, rows)
 
     def one(row):
-        ref = by_instr[row["instruction"]]
-        switch = order_switch(row["instruction"])
-        out1, out2 = (ref["reference_output"], row["response"]) if switch \
-            else (row["response"], ref["reference_output"])
-        # the template contains literal JSON braces, so use plain replacement
-        # instead of str.format (which would choke on them)
-        filled = (template
-                  .replace("{instruction}", row["instruction"])
-                  .replace("{output_1}", out1)
-                  .replace("{output_2}", out2))
-        pref_first = relay.judge_call(to_chat_messages(filled))[0]
-        if pref_first is None:
-            return None, None
-        # pref_first = P('m') = P(output_1). candidate is output_1 iff not switch
-        return (pref_first if not switch else 1.0 - pref_first), len(row["response"])
+        ref = by_instr[row['instruction']]
+        switch = order_switch(row['instruction'])
+        out1, out2 = (ref['reference_output'], row['response']) if switch else (row['response'], ref['reference_output'])
+        filled = fill_template(template, row['instruction'], out1, out2)
+        pref_first, usage = relay.judge_call(to_chat_messages(filled))
+        if pref_first is not None and (not math.isfinite(pref_first) or not 0 <= pref_first <= 1):
+            raise ValueError('invalid judge preference')
+        return {'preference': None if pref_first is None else (1 - pref_first if switch else pref_first),
+                'chars': len(row['response']), 'usage': usage,
+                'instruction': row['instruction'], 'sample_idx': row.get('sample_idx', 0)}
 
-    prefs, lens, failed = [], [], 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(one, r) for r in rows]
-        for i, f in enumerate(as_completed(futs)):
-            p, l = f.result()
-            if p is None:
-                failed += 1
-            else:
-                prefs.append(p)
-                lens.append(l)
-            if (i + 1) % 200 == 0:
-                spent = relay.spent_since_start()
-                print(f"  [{tag}] {i+1}/{len(rows)} judged, spent so far ¥{spent:.2f}", flush=True)
-                if 0 <= spent >= relay.budget_cny:
-                    raise RuntimeError(f"BUDGET GUARD: ¥{spent:.2f} >= ¥{relay.budget_cny}")
+    pending = [(digest(row), row) for row in rows if digest(row) not in records]
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for start in range(0, len(pending), workers):
+            spent = relay.spent_since_start()
+            if not math.isfinite(spent) or spent < 0:
+                raise RuntimeError('Cannot verify usage; judge dispatch stopped')
+            if spent >= relay.budget_cny:
+                raise RuntimeError(f'BUDGET GUARD: ¥{spent:.2f} >= ¥{relay.budget_cny}; progress saved to {checkpoint}')
+            futures = {executor.submit(one, row): key for key, row in pending[start:start + workers]}
+            errors = []
+            for future in as_completed(futures):
+                try:
+                    records[futures[future]] = future.result()
+                    atomic_text(checkpoint, json.dumps(saved, ensure_ascii=False, allow_nan=False))
+                except Exception as error:
+                    errors.append(error)
+            if errors:
+                raise errors[0]
+            if start % (workers * 25) == 0:
+                print(f'  [{tag}] {len(records)}/{len(rows)} judged, spent before batch ¥{spent:.2f}', flush=True)
 
-    n = len(prefs)
-    return {
-        "tag": tag, "n_judged": n, "n_failed_parse": failed,
-        "weighted_win_rate": sum(prefs) / n if n else None,
-        "win_rate": sum(p > 0.5 for p in prefs) / n if n else None,
-        "mean_candidate_chars": sum(lens) / len(lens) if lens else None,
-        "judge_model": JUDGE_MODEL, "spent_cny": round(relay.spent_since_start(), 3),
-    }
+    ordered = [records[digest(row)] for row in rows]
+    valid = [record for record in ordered if record['preference'] is not None]
+    prefs = [record['preference'] for record in valid]
+    n = len(valid)
+    return {'tag': tag, 'n_judged': n, 'n_failed_parse': len(rows) - n,
+            'weighted_win_rate': sum(prefs) / n if n else None,
+            'win_rate': sum(p > 0.5 for p in prefs) / n if n else None,
+            'mean_candidate_chars': sum(r['chars'] for r in valid) / n if n else None,
+            'judge_model': JUDGE_MODEL, 'spent_cny': round(relay.spent_since_start(), 3),
+            'annotations': str(checkpoint), 'judge_protocol': protocol}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gens-root", default="runs/alpacaeval-evals")
+    ap.add_argument("--generation-file", default="generations_t1.0_n1.jsonl",
+                    help="Generation filename within each tag (select an n>1 recipe here)")
     ap.add_argument("--refs", default="datasets/alpacaeval/eval_gpt4turbo_reference.jsonl")
     ap.add_argument("--tags", nargs="+", default=[],
                     help="subset of tags (default: every dir with generations)")
@@ -187,13 +296,21 @@ def main():
                     help="judge reference-vs-reference on 30 prompts; expect WR≈50%")
     args = ap.parse_args()
 
-    key = Path(args.key_file).read_text().strip()
+    if args.limit < 0 or args.workers < 1:
+        ap.error('limit must be nonnegative and workers positive')
     template = load_template()
     refs = [json.loads(l) for l in open(args.refs)]
-    assert len(refs) == 805
-    relay = Relay(key, args.budget_cny)
-    print(f"relay balance check: ¥{relay.spent_since_start():.2f} spent this session "
-          f"(guard ¥{args.budget_cny})", flush=True)
+    validate_references(refs)
+    relay = None
+
+    def get_relay():
+        nonlocal relay
+        if relay is None:
+            key = os.environ.get('LINKAPI_KEY') or Path(args.key_file).read_text().strip()
+            relay = Relay(key, args.budget_cny)
+            print(f"relay balance check: ¥{relay.spent_since_start():.2f} spent this session "
+                  f"(guard ¥{args.budget_cny})", flush=True)
+        return relay
 
     if args.selftest_judge:
         # candidate = reference itself -> should be ~50/50
@@ -204,7 +321,7 @@ def main():
                 for i, r in enumerate(refs[:30])]
         gens = tmp / "generations_t1.0_n1.jsonl"
         gens.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows))
-        res = judge_tag("selftest-ref-vs-ref", gens, refs, template, relay, 30, args.workers)
+        res = judge_tag("selftest-ref-vs-ref", gens, refs, template, get_relay(), 30, args.workers)
         print(json.dumps(res, indent=1, ensure_ascii=False))
         assert 0.3 <= res["weighted_win_rate"] <= 0.7, "ref-vs-ref should be ~50%!"
         print("SELFTEST OK — judge loop validated")
@@ -212,30 +329,51 @@ def main():
 
     gens_root = Path(args.gens_root)
     tags = args.tags or sorted(d.name for d in gens_root.iterdir()
-                               if (d / "generations_t1.0_n1.jsonl").exists())
+                               if (d / args.generation_file).exists())
     print(f"judging {len(tags)} tags: {tags}", flush=True)
 
+    out = gens_root / ('judged_summary_pilot.json' if args.limit else 'judged_summary.json')
     summary = {}
     suffix = "_pilot" if args.limit else ""
+    if out.exists():
+        prior = json.loads(out.read_text())
+        if not isinstance(prior, dict):
+            raise ValueError(f'Existing judge summary is invalid: {out}')
+        for tag in prior:
+            gen_path = gens_root / tag / args.generation_file
+            result_path = gens_root / tag / f"results_judged{suffix}.json"
+            candidate_rows(gen_path, refs, args.limit or None)
+            manifest = result_path.with_suffix('.manifest.json')
+            config = judge_result_config(
+                gen_path, refs, template, args.limit, args.generation_file)
+            if not cache_matches(manifest, config, [result_path]):
+                raise ValueError(
+                    f'Existing summary tag {tag!r} has no verified result; use a new output directory')
+            summary[tag] = json.loads(result_path.read_text())
     for tag in tags:
         res_path = gens_root / tag / f"results_judged{suffix}.json"
-        if res_path.exists():
+        gen_path = gens_root / tag / args.generation_file
+        candidate_rows(gen_path, refs, args.limit or None)
+        manifest = res_path.with_suffix('.manifest.json')
+        config = judge_result_config(
+            gen_path, refs, template, args.limit, args.generation_file)
+        if cache_matches(manifest, config, [res_path]):
             print(f"[{tag}] already judged, skipping", flush=True)
             summary[tag] = json.loads(res_path.read_text())
             continue
         print(f"[{tag}] judging ...", flush=True)
         t0 = time.time()
-        res = judge_tag(tag, gens_root / tag / "generations_t1.0_n1.jsonl",
-                        refs, template, relay, args.limit or None, args.workers)
+        res = judge_tag(tag, gen_path,
+                        refs, template, get_relay(), args.limit or None, args.workers)
         res["wall_min"] = round((time.time() - t0) / 60, 1)
         res["limit"] = args.limit or None
-        res_path.write_text(json.dumps(res, indent=1, ensure_ascii=False))
+        atomic_text(res_path, json.dumps(res, indent=1, ensure_ascii=False))
+        commit_cache(manifest, config, [res_path])
         summary[tag] = res
-        print(f"[{tag}] WWR={res['weighted_win_rate']:.3f} WR={res['win_rate']:.3f} "
+        print(f"[{tag}] WWR={res['weighted_win_rate']} WR={res['win_rate']} "
               f"({res['wall_min']}min, ¥{res['spent_cny']})", flush=True)
 
-    out = gens_root / "judged_summary.json"
-    out.write_text(json.dumps(summary, indent=1, ensure_ascii=False))
+    atomic_text(out, json.dumps(summary, indent=1, ensure_ascii=False))
     print(f"\n{'tag':32s} {'WWR':>6s} {'WR':>6s} {'len':>7s}")
     for tag, r in sorted(summary.items()):
         if r.get("weighted_win_rate") is not None:

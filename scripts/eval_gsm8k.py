@@ -5,7 +5,7 @@ Each adapter entry TAG=PATH is evaluated inside one shared vLLM engine; the
 literal path "none" evaluates the bare base model. 0-shot prompting through
 the trainer's chat template, asking for the final answer after '####';
 scoring extracts that number (fallback: last number in the response) and
-compares to the gold answer with 0.1% relative tolerance.
+compares numerically exactly to the gold answer (decimal, without float rounding).
 
 Usage (in rjob):
   python3 scripts/eval_gsm8k.py \
@@ -20,11 +20,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from decimal import Decimal, InvalidOperation
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
+                                    eval_config, fingerprint, validate_outputs, validate_adapter_base)
+import math
 
 PROMPT_SUFFIX = (" Solve the problem step by step. "
                  "End your response with the final numeric answer after '#### '.")
@@ -35,7 +39,8 @@ def parse_recipe(spec: str) -> dict:
     if len(parts) != 4:
         raise ValueError(f"recipe '{spec}' must be temp:n_samples:top_p:top_k")
     temp, n, top_p, top_k = float(parts[0]), int(parts[1]), float(parts[2]), int(parts[3])
-    if temp < 0 or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1:
+    if (not math.isfinite(temp) or (temp != 0 and not 0.01 <= temp <= 2.0)
+            or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1):
         raise ValueError(f"out-of-range values in recipe '{spec}'")
     if temp == 0.0 and n > 1:
         raise ValueError(f"greedy (temp 0) cannot draw {n} distinct samples: '{spec}'")
@@ -48,7 +53,7 @@ def parse_adapters(specs):
         if "=" not in spec:
             raise ValueError(f"adapter spec '{spec}' must be TAG=PATH (or TAG=none)")
         tag, path = spec.split("=", 1)
-        if not tag or not path:
+        if not tag or not path or Path(tag).name != tag or tag in ('.', '..') or any(t == tag for t, _ in out):
             raise ValueError(f"empty tag or path in '{spec}'")
         out.append((tag, path))
     if not out:
@@ -68,7 +73,7 @@ def extract_number(text: str):
         return None
     cand = hits[-1].replace(",", "").replace("$", "").rstrip("%")
     try:
-        return float(cand)
+        return str(Decimal(cand))
     except ValueError:
         return None
 
@@ -77,11 +82,17 @@ def gold_number(answer_field: str):
     hits = re.findall(r"####\s*(-?\$?\d[\d,]*(?:\.\d+)?)", answer_field)
     if not hits:
         raise ValueError(f"no '#### N' in gold answer: {answer_field[:80]!r}")
-    return float(hits[-1].replace(",", "").replace("$", ""))
+    return str(Decimal(hits[-1].replace(",", "").replace("$", "")))
 
 
 def is_correct(pred, gold):
-    return pred is not None and abs(pred - gold) <= max(1e-4, abs(gold) * 1e-3)
+    if pred is None or gold is None:
+        return False
+    try:
+        a, b = Decimal(str(pred)), Decimal(str(gold))
+        return a.is_finite() and b.is_finite() and a == b
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def run_selftest(args) -> None:
@@ -102,8 +113,8 @@ def run_selftest(args) -> None:
         got = is_correct(pred, gold)
         assert got == expect, f"{text!r}: pred={pred} gold={gold} expected {expect}"
     # fallback path: no #### but numbers present -> last number
-    assert extract_number("first 3 then 4 then 6") == 6.0
-    assert gold_number("reasoning...\n#### 1,000") == 1000.0
+    assert extract_number("first 3 then 4 then 6") == "6"
+    assert gold_number("reasoning...\n#### 1,000") == "1000"
     # recipes / adapters validation shared with eval_ifeval
     for bad in ["0.7", "0.0:5:1.0:-1"]:
         try:
@@ -162,46 +173,58 @@ def main():
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from transformers import AutoTokenizer, AutoConfig
+    from vpo_rm.integration import (checked_sampling_params, sampling_summary,
+                                    vllm_support_kwargs)
     from vpo_rm.trainer import VPOTrainer
+    from vpo_rm.token_policy import get_stop_token_ids
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    stop_ids = get_stop_token_ids(tokenizer)
+    model_fingerprint = fingerprint(args.model, full_weights=False)
     rendered = [VPOTrainer._render_chat_prompt(tokenizer, row["question"] + PROMPT_SUFFIX)
                 for row in data]
 
-    known = set(tokenizer.get_vocab().values())
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
-    banned = {i: -100.0 for i in range(vocab_size) if i not in known}
+    support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
+    support_summary = sampling_summary(support_kwargs)
 
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True,
-              enable_lora=True, max_lora_rank=64, max_loras=4,
-              max_model_len=4096, max_num_seqs=64,
-              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+    llm = None
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, (tag, path) in enumerate(adapters):
+        validate_adapter_base(path, args.model)
         lora = None if path == "none" else LoRARequest(f"lora-{tag}", i + 1, str(Path(path)))
         tag_dir = out_dir / tag
         tag_dir.mkdir(parents=True, exist_ok=True)
 
+        adapter_fingerprint = None if path == 'none' else fingerprint(path)
         for recipe in recipes:
             rectag = f"t{recipe['temp']}_n{recipe['n']}"
             result_path = tag_dir / f"results_{rectag}.json"
-            if result_path.exists():
-                print(f"[{tag}/{rectag}] results exist, skipping", flush=True)
+            gen_path = tag_dir / f'generations_{rectag}.jsonl'
+            manifest = tag_dir / f'manifest_{rectag}.json'
+            config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint,
+                                 stop_ids, 'gsm8k', support_summary)
+            if cache_matches(manifest, config, [result_path, gen_path]):
+                print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
-            params = SamplingParams(
+            if llm is None:
+                llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
+              enable_lora=True, max_lora_rank=64, max_loras=4,
+              max_model_len=4096, max_num_seqs=64,
+              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+            params = checked_sampling_params(SamplingParams,
                 temperature=recipe["temp"], top_p=recipe["top_p"],
                 top_k=recipe["top_k"], n=recipe["n"],
                 max_tokens=args.max_tokens, seed=args.seed,
-                stop_token_ids=[151643, 151645], logit_bias=banned)
+                stop_token_ids=list(stop_ids), **support_kwargs)
             outputs = llm.generate(rendered, params, lora_request=lora)
-            n_actual = len(outputs[0].outputs)
-            if n_actual != recipe["n"]:
-                raise RuntimeError(f"vLLM returned {n_actual} samples, expected {recipe['n']}")
+            validate_outputs(outputs, len(data), recipe['n'])
+            n_actual = recipe['n']
 
             per_sample_acc, details = [], []
-            tokens_by_prompt = [sorted(len(o.outputs[s].token_ids) for s in range(n_actual))
+            tokens_by_prompt = [[len(o.outputs[s].token_ids) for s in range(n_actual)]
                                 for o in outputs]
             for s in range(n_actual):
                 correct = 0
@@ -222,7 +245,7 @@ def main():
                   f"{', '.join(f'{a:.3f}' for a in per_sample_acc)})")
             print(f"  response length mean={mean_len:.0f} tokens")
 
-            result_path.write_text(json.dumps({
+            atomic_text(result_path, json.dumps({
                 "adapter": str(path), "tag": tag,
                 "recipe": recipe, "seed": args.seed,
                 "max_tokens": args.max_tokens,
@@ -231,12 +254,13 @@ def main():
                 "n_problems": len(data),
                 "details": details,
             }, indent=1, ensure_ascii=False))
-            (tag_dir / f"generations_{rectag}.jsonl").write_text("\n".join(json.dumps({
+            atomic_text(gen_path, "\n".join(json.dumps({
                 "idx": j, "question": data[j]["question"],
                 "gold": golds[j],
                 "responses": [outputs[j].outputs[s].text for s in range(n_actual)],
                 "response_tokens": tokens_by_prompt[j],
             }) for j in range(len(data))))
+            commit_cache(manifest, config, [result_path, gen_path])
             print(f"  Saved to {result_path}", flush=True)
 
     print("\nDone.")

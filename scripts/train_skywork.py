@@ -15,7 +15,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from vpo_rm.trainer import TrainerConfig, VPOTrainer, load_prompt_dataset, split_prompts
+from vpo_rm.trainer import TrainerConfig, VPOTrainer, load_prompt_dataset, split_prompts, check_fresh_output
+from vpo_rm.data import exclude_benchmark_prompts
+from vpo_rm.length_reward_cli import add_length_reward_args, length_reward_config_kwargs
 
 
 def main(argv=None):
@@ -32,29 +34,42 @@ def main(argv=None):
     p.add_argument("--max-response-tokens", type=int, default=2048)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--top-k", type=int, default=0)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--init-adapter", default="", help="SFT LoRA adapter used to initialize the actor")
+    add_length_reward_args(p)
+    p.add_argument("--policy-epochs", type=int, default=1)
+    p.add_argument("--optimizer-minibatch-responses", type=int, default=64)
     p.add_argument("--actor-device", default="cuda:0")
     p.add_argument("--reward-device", default="cuda:1")
     p.add_argument("--smoke", action="store_true", help="hard cap to <=1 rollout, 2 prompts, 2 responses/group")
     args = p.parse_args(argv)
     if args.prompts_file:
         prompts = [x.strip() for x in Path(args.prompts_file).read_text().splitlines() if x.strip()]
-        prompts, valid, hashes = split_prompts(prompts, validation_size=2000)
-        if not prompts:
-            prompts = valid
+        prompts, exclusion = exclude_benchmark_prompts(prompts)
+        # Keep a disjoint holdout whenever there are at least two unique prompts.
+        # A one-prompt smoke file has an explicitly empty validation split.
+        validation_size = min(2000, max(0, len(prompts) - 1))
+        prompts, valid, hashes = split_prompts(prompts, validation_size=validation_size)
+        hashes["benchmark_exclusion"] = exclusion
     else:
         prompts, valid, hashes = load_prompt_dataset(
             "HuggingFaceH4/ultrafeedback_binarized", validation_size=2000,
-            dataset_path=args.dataset_path)
+            dataset_path=args.dataset_path, exclude_benchmarks=True)
     cfg = TrainerConfig(model_name=args.model, reward_model_name=args.rm, output_dir=args.output_dir,
                         method=args.method, rollout_iterations=args.max_rollouts,
                         prompts_per_rollout=args.prompts_per_rollout, group_size=args.group_size,
                         max_response_tokens=args.max_response_tokens,
                         seed=args.seed, top_k=args.top_k,
+                        temperature=args.temperature, init_adapter=args.init_adapter,
+                        policy_epochs_per_rollout=args.policy_epochs,
+                        optimizer_minibatch_responses=args.optimizer_minibatch_responses,
                         smoke=args.smoke, actor_device=args.actor_device,
-                        reward_device=args.reward_device)
+                        reward_device=args.reward_device, **length_reward_config_kwargs(args))
     cfg = cfg.resolved()
     # Record split information before loading potentially large checkpoints.
-    out = Path(cfg.output_dir); out.mkdir(parents=True, exist_ok=True)
+    out = Path(cfg.output_dir)
+    check_fresh_output(out)
+    out.mkdir(parents=True, exist_ok=True)
     (out / "data_split.json").write_text(json.dumps(hashes, indent=2, sort_keys=True))
     trainer = VPOTrainer.from_pretrained(cfg)
     prompts = trainer.filter_prompts(prompts)

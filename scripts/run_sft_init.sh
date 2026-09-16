@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$(dirname "${BASH_SOURCE[0]}")/model_defaults.sh"
+cd "$R"
 export PYTHONPATH="$PWD:$PWD/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -19,18 +21,21 @@ fi
 # or positional for local runs.
 mode="${SFT_MODE:-${1:-}}"
 SFT_MODEL="${SFT_MODEL:-models/Qwen3-14B-Base}"
-SFT_OUTPUT="${SFT_OUTPUT:-models/sft-init-qwen3-14b-base}"
+SFT_OUTPUT="${SFT_OUTPUT:-$(default_sft_output "$SFT_MODEL")}"
+SFT_RESPONSE_EOS="${SFT_RESPONSE_EOS:-native}"
 case "$mode" in
   smoke)
     # Fast validation pass: a few hundred examples, still exercises rendering,
     # prefix assertions, LoRA forward/backward, adapter save.
-    exec python3 scripts/sft_init.py --limit 300 --micro-batch 2 --grad-accum 4 \
+    exec python3 scripts/sft_init.py --model "$SFT_MODEL" --response-eos "$SFT_RESPONSE_EOS" \
+      --limit 300 --micro-batch 2 --grad-accum 4 \
       --output "runs/sft-init-smoke-${JOB_ID:-local}" ;;
   full)
     # Classmate's sizing: small subset, a couple of epochs — initialization
     # only needs to burn in format/stopping conventions, not peak quality.
     exec python3 scripts/sft_init.py \
       --model "$SFT_MODEL" \
+      --response-eos "$SFT_RESPONSE_EOS" \
       --max-examples 10000 --epochs 2 \
       --output "$SFT_OUTPUT" ;;
   *) echo "unsupported mode: $mode" >&2; exit 2 ;;

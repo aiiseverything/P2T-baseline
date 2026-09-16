@@ -1,5 +1,5 @@
 {
-  "description": "UltraFeedback experiment specification; trainer integration is required",
+  "description": "UltraFeedback experiment specification; audited defaults for new runs, historical manifests remain authoritative for old runs",
   "seeds": [
     42
   ],
@@ -9,11 +9,19 @@
   ],
   "actor": "Qwen/Qwen3-14B-Base",
   "actor_note": "p9d: switched from the instruct Qwen3-14B (already aligned, no headroom) to the pretrained base, matching the BLEUBERI setup",
+  "initialization": {
+    "adapter": "models/sft-native-eos-clean2k5e2",
+    "compatible_actor": "Qwen3-14B-Base",
+    "other_actors": "require an explicit matching native-EOS init adapter",
+    "new_sft_response_eos": "native"
+  },
   "hardware": {
     "gpu_model": "H200",
-    "gpu_count": 2,
+    "gpu_count": 3,
     "actor_device": "cuda:0",
     "rm_device": "cuda:1",
+    "vllm_device": "cuda:2",
+    "protocol_note": "formal profile_vllm_full uses 3 GPUs; native HF rollout uses the actor GPU and requires 2 GPUs total",
     "microbatch_responses": 1,
     "generation_microbatch_responses": 1
   },
@@ -57,9 +65,12 @@
     "clip_eps": 0.2,
     "group_std_correction": 0,
     "group_std_eps": 1e-06,
-    "learning_rate": 1e-04,
-    "learning_rate_note": "p9d: LoRA-appropriate rate; p9c inherited the paper's full-FT 1e-6, ~100x too small (adapter delta norm 0.25 after 200 steps, reward flat)",
-    "beta": 0.01,
+    "learning_rate": 5e-05,
+    "learning_rate_note": "matches run_skywork_500.sh; override and record per experiment",
+    "beta": 0.03,
+    "kl_reference": "init",
+    "presence_penalty": 0.0,
+    "sampling_constraint_policy": "top_p=1 and top_k=0; sampling temperature and minimum-token stop suppression also apply to training probabilities",
     "optimizer": "AdamW",
     "weight_decay": 0.01,
     "max_grad_norm": 1.0,
@@ -75,8 +86,9 @@
   "vpo_rm": {
     "tau": 1.0,
     "tau_note": "Plan B (see tau失配与修复方案.md): softmax runs over the per-response standardized utility, so tau is dimensionless; p9c's raw-utility softmax at tau=1 measured ESS 0.998 (mechanism inert)",
-    "weight_cap": 20.0,
-    "credit_standardization": "per-response mean/std before softmax, relative floor 1e-3 of mean|d|; degenerate directions fall back to uniform GRPO weights"
+    "credit_lambda": 2.0,
+    "credit_standardization": "mean/std over unfrozen response positions with relative floor 1e-3 of mean|d|; frozen tokens have weight 1; dynamically bracket and solve both final bounds [1/lambda,lambda]",
+    "structural_token_policy": "derive IDs from the actual tokenizer: nonempty whitespace, or a newline-containing token that strips to one period; exclude special tokens"
   },
   "settings": [
     {
@@ -94,15 +106,27 @@
       "prompt_selection": "first 256 of the SHA256-ordered 2000 validation prompts; frozen across runs, checkpoints and temperatures",
       "checkpoint_interval": 50,
       "generation": [
-        {"temperature": 0.7, "top_p": 0.9, "n": 1, "role": "primary, matches benchmark conditions"},
-        {"temperature": 0.0, "n": 1, "role": "greedy column, repetition-loop detector for mid-training checkpoints"}
+        {
+          "temperature": 0.7,
+          "top_p": 0.9,
+          "n": 1,
+          "role": "primary, matches benchmark conditions"
+        },
+        {
+          "temperature": 0.0,
+          "n": 1,
+          "role": "greedy column, repetition-loop detector for mid-training checkpoints"
+        }
       ],
       "scoring": "Skywork RM, per-prompt scores logged (eval.jsonl) for paired GRPO-vs-VPO differences and bootstrap CIs"
     },
     "benchmarks": [
-      "AlpacaEval 2",
-      "Arena-Hard v2",
-      "IFEval"
+      "Alpaca prompts with internal GPT-4.1 pairwise judge (not official AlpacaEval 2 length-controlled score)",
+      "IFEval",
+      "GSM8K exact numeric accuracy"
+    ],
+    "planned_not_implemented": [
+      "Arena-Hard v2"
     ],
     "temperature": 0.7,
     "top_p": 0.9,
@@ -110,7 +134,7 @@
     "max_response_tokens": 2048,
     "checkpoint": "final",
     "paired_bootstrap_confidence": 0.95,
-    "judge_configuration": "pin official evaluator config and judge revision in run manifest"
+    "judge_configuration": "record the internal judge model, evaluator configuration, and dependency revisions in the run manifest; official AlpacaEval LC is not implemented"
   },
   "reporting": {
     "training_runs": 4,

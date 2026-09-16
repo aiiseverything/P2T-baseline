@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$R:$R/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
@@ -34,6 +34,7 @@ if [ -n "${ALPACA_SHARD:-}" ]; then
 fi
 
 exec python3 scripts/eval_alpaca.py \
+  --model "${ALPACA_MODEL:-${EVAL_MODEL:-models/Qwen3-14B-Base}}" \
   --output "${ALPACA_OUT:?required}" \
   --max-tokens "${ALPACA_MAX_TOKENS:-2048}" \
   --recipes $RECIPES \

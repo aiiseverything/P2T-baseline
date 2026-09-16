@@ -35,14 +35,14 @@ B14=models/Qwen3-14B-Base
 B8=models/Qwen3-8B-Base
 RM8=models/Skywork-Reward-V2-Qwen3-8B
 RM4=models/Skywork-Reward-V2-Qwen3-4B
-S14=models/sft-init-qwen3-14b-base
-S8=models/sft-init-qwen3-8b-base
+S14=models/sft-native-eos-clean2k5e2
+S8=models/sft-native-eos-qwen3-8b-base
 CALIB=runs/rm4b-calib
 VPO_ENV="CREDIT_LAMBDA=4.0 FREEZE_STOP_TOKENS=1 FREEZE_STRUCTURAL=1"
 
 # --- prerequisites ---
-submit run_sft_init.sh sft-init-8b 1 16 200000 \
-  "SFT_MODE=full" "SFT_MODEL=$R/$B8" "SFT_OUTPUT=$R/$S8"
+submit run_sft_init.sh sft-native-init-8b 1 16 200000 \
+  "SFT_MODE=full" "SFT_MODEL=$R/$B8" "SFT_OUTPUT=$R/$S8" "SFT_RESPONSE_EOS=native"
 submit run_rm_calib.sh calib-rm4b 3 48 600000 \
   "CALIB_MODEL=$R/$B14" "CALIB_RM=$R/$RM4" "CALIB_OUT=$R/$CALIB" "CALIB_INIT=$R/$S14"
 
@@ -80,4 +80,4 @@ submit run_train_eval_chain.sh mx-8b-rm4b-vpo 3 48 600000 \
 
 echo
 echo "=== matrix jobs ==="
-rjob list 2>/dev/null | grep -E "showname=(sft-init-8b|calib-rm4b|mx-)" || true
+rjob list 2>/dev/null | grep -E "showname=(sft-native-init-8b|calib-rm4b|mx-)" || true

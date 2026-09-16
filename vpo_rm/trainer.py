@@ -12,6 +12,8 @@ the boundary are detached and copied explicitly.  No job is submitted by this mo
 from __future__ import annotations
 
 import argparse
+import copy
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -27,8 +29,10 @@ import torch
 from .alignment import check_response_tokens, check_tokenizers, shared_output_mask
 from .core import grpo_policy_loss
 from .integration import (actor_response_logits, build_credit_cache,
-                          response_reward_gradients, selected_logp_from_logits)
+                          response_reward_gradients, selected_logp_from_logits,
+                          sampling_logits)
 from .reward import LastTokenReward
+from .token_policy import get_stop_token_ids, get_structural_token_ids
 
 
 def normalize_prompt(text: str) -> str:
@@ -57,6 +61,16 @@ def split_prompts(prompts: Iterable[str], validation_size: int = 2000):
                           "num_unique": len(rows), "validation_size": len(valid)}
 
 
+def check_fresh_output(output_dir):
+    """Reject existing training artifacts; this trainer has no resume protocol."""
+    path = Path(output_dir)
+    markers = ("metrics.jsonl", "credit_stats.jsonl", "profile_manifest.json",
+               "profile_metrics.jsonl", "vllm-adapters", "adapter_config.json",
+               "length_reward_calibration.json")
+    if path.is_file() or any((path / name).exists() for name in markers) or any(path.glob("checkpoint-*")):
+        raise FileExistsError(f"Use a fresh output directory; existing training artifacts found: {path}")
+
+
 @dataclass
 class TrainerConfig:
     model_name: str = "Qwen/Qwen3-14B"
@@ -64,6 +78,7 @@ class TrainerConfig:
     output_dir: str = "runs/skywork"
     actor_device: str = "cuda:0"
     reward_device: str = "cuda:1"
+    allocated_gpu_count: int = 2  # Reserved devices; zero for CPU-only runs.
     seed: int = 42
     group_size: int = 8
     prompts_per_rollout: int = 8
@@ -86,12 +101,21 @@ class TrainerConfig:
     credit_lambda: float = 2.0
     freeze_stop_tokens: bool = False
     freeze_structural: bool = False
-    min_response_tokens: int = 8
+    min_response_tokens: int | None = None  # Resolved to 0 for soft rewards, 8 for legacy.
     degenerate_penalty: float = 1.0
     init_adapter: str = ""
-    kl_reference: str = "rollout"
+    kl_reference: str = "init"
     length_penalty_slope: float = 0.0
     length_penalty_anchor: int = 600
+    length_reward_mode: str = "legacy"
+    length_reward_sigma0: float | None = None
+    short_response_threshold: int = 8
+    long_response_threshold: int = 1024
+    short_penalty_strength: float = .5
+    long_penalty_strength: float = 2.
+    advantage_std_floor_fraction: float = .5
+    length_calibration_prompts: int = 128
+    degenerate_newline_run: int = 32
     method: str = "vpo_rm"
     checkpoint_interval: int = 100
     token_chunk_size: int = 128
@@ -110,12 +134,22 @@ class TrainerConfig:
 
     def resolved(self) -> "TrainerConfig":
         c = TrainerConfig(**asdict(self))
+        if c.length_reward_mode not in {"legacy", "soft"}:
+            raise ValueError("length_reward_mode must be legacy or soft")
+        if c.min_response_tokens is None:
+            c.min_response_tokens = 0 if c.length_reward_mode == "soft" else 8
         if c.method not in {"grpo", "vpo_rm"}:
             raise ValueError("method must be grpo or vpo_rm")
         if c.kl_reference not in {"rollout", "init"}:
             raise ValueError("kl_reference must be rollout or init")
-        if c.kl_reference == "init" and not c.init_adapter:
-            raise ValueError("kl_reference=init requires init_adapter")
+        if c.init_adapter and not c.lora:
+            raise ValueError("init_adapter requires lora=True")
+        if c.top_p != 1.0 or c.top_k != 0:
+            raise ValueError("training supports top_p=1 and top_k=0 only")
+        if not math.isfinite(c.temperature) or not .01 <= c.temperature <= 2.0:
+            raise ValueError("temperature must be in [0.01, 2] to avoid backend clamping")
+        if c.lora_dropout != 0:
+            raise ValueError("training requires zero dropout for matching rollout probabilities")
         if c.smoke:
             c.rollout_iterations = min(c.rollout_iterations, c.max_smoke_rollouts)
             c.prompts_per_rollout = min(c.prompts_per_rollout, c.max_smoke_prompts)
@@ -125,6 +159,29 @@ class TrainerConfig:
             raise ValueError("group_size must be >=2 and prompts_per_rollout positive")
         if c.policy_epochs_per_rollout < 1 or c.optimizer_minibatch_responses < 1:
             raise ValueError("policy_epochs_per_rollout and optimizer_minibatch_responses must be positive")
+        if c.max_response_tokens < 1 or not 0 <= c.min_response_tokens <= c.max_response_tokens:
+            raise ValueError("require 0 <= min_response_tokens <= max_response_tokens and a positive maximum")
+        if c.length_reward_mode == "soft":
+            if c.min_response_tokens != 0 or c.length_penalty_slope != 0:
+                raise ValueError("soft length rewards require min_response_tokens=0 and length_penalty_slope=0")
+            if not 0 < c.short_response_threshold <= c.long_response_threshold < c.max_response_tokens:
+                raise ValueError("require 0 < short_response_threshold <= long_response_threshold < max_response_tokens")
+            if c.length_reward_sigma0 is not None and (
+                    not math.isfinite(c.length_reward_sigma0) or c.length_reward_sigma0 <= 0):
+                raise ValueError("length_reward_sigma0 must be finite and positive")
+            if any(not math.isfinite(x) or x < 0 for x in
+                   (c.short_penalty_strength, c.long_penalty_strength)):
+                raise ValueError("length penalty strengths must be finite and nonnegative")
+            if not math.isfinite(c.advantage_std_floor_fraction) or c.advantage_std_floor_fraction <= 0:
+                raise ValueError("advantage_std_floor_fraction must be finite and positive")
+            if not math.isfinite(c.degenerate_penalty) or c.degenerate_penalty <= 0:
+                raise ValueError("soft degenerate_penalty must be finite and positive")
+            if c.length_calibration_prompts < 1 or c.degenerate_newline_run < 1:
+                raise ValueError("length_calibration_prompts and degenerate_newline_run must be positive")
+        if c.checkpoint_interval < 1 or c.microbatch_responses < 1:
+            raise ValueError("checkpoint_interval and microbatch_responses must be positive")
+        if not isinstance(c.allocated_gpu_count, int) or c.allocated_gpu_count < 0:
+            raise ValueError("allocated_gpu_count must be a nonnegative integer")
         return c
 
 
@@ -132,6 +189,7 @@ class VPOTrainer:
     """Minimal production trainer; actor and RM are always placed on separate devices."""
     def __init__(self, actor, actor_tokenizer, reward, reward_tokenizer, config: TrainerConfig):
         self.cfg = config.resolved()
+        check_fresh_output(self.cfg.output_dir)
         # Seed every RNG used by prompt sampling and generation.  The config's seed
         # must be effective for reproducible rollouts across formal runs.
         random.seed(self.cfg.seed)
@@ -149,6 +207,21 @@ class VPOTrainer:
         self.output_mask = shared_output_mask(self.actor_tokenizer,
                                                self.actor.get_output_embeddings().weight.shape[0],
                                                self.actor_device)
+        self.stop_token_ids = get_stop_token_ids(self.actor_tokenizer)
+        self.structural_token_ids = (get_structural_token_ids(self.actor_tokenizer)
+                                     if self.cfg.freeze_structural else ())
+        if any(isinstance(m, torch.nn.Dropout) and m.p > 0 for m in self.actor.modules()):
+            raise ValueError("Actor dropout must be zero to match generation and training probabilities")
+        for name in ("attention_dropout", "hidden_dropout", "hidden_dropout_prob", "attention_probs_dropout_prob"):
+            if float(getattr(getattr(self.actor, "config", None), name, 0.0) or 0.0) != 0:
+                raise ValueError("Actor dropout must be zero to match generation and training probabilities")
+        self.reference_actor = None
+        self.reference_adapter = None
+        if self.cfg.kl_reference == "init":
+            if hasattr(self.actor, "disable_adapter"):
+                self.reference_adapter = "ref" if self.cfg.init_adapter else "base"
+            else:
+                self.reference_actor = copy.deepcopy(self.actor).eval().requires_grad_(False)
         self.optimizer = torch.optim.AdamW((p for p in self.actor.parameters() if p.requires_grad),
                                            lr=self.cfg.learning_rate,
                                            weight_decay=self.cfg.weight_decay)
@@ -159,6 +232,7 @@ class VPOTrainer:
         self.log_path = Path(self.cfg.output_dir) / "metrics.jsonl"
         self.filtered_prompt_count = 0
         self.data_split = None
+        self.length_reward_calibration = None
 
     @staticmethod
     def _render_chat_prompt(tokenizer, prompt: str, tokenize: bool = False):
@@ -183,6 +257,12 @@ class VPOTrainer:
     def from_pretrained(cls, config: TrainerConfig) -> "VPOTrainer":
         from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
         c = config.resolved()
+        check_fresh_output(c.output_dir)
+        # PEFT initializes random LoRA A weights before trainer.__init__ runs.
+        random.seed(c.seed)
+        torch.manual_seed(c.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(c.seed)
         dtype = torch.bfloat16 if c.actor_device.startswith("cuda") else torch.float32
         atok = AutoTokenizer.from_pretrained(c.model_name, padding_side="left", trust_remote_code=True)
         rtok = AutoTokenizer.from_pretrained(c.reward_model_name, padding_side="right", trust_remote_code=True)
@@ -274,6 +354,7 @@ class VPOTrainer:
 
     @torch.no_grad()
     def rollout(self, prompts: Sequence[str]):
+        from transformers import GenerationConfig
         batch, rendered_prompts = self._encode_prompts(prompts)
         self.actor.eval()
         # Generate one prompt at a time to bound KV-cache memory.  The configured
@@ -289,16 +370,15 @@ class VPOTrainer:
                 # stop at BOTH end tokens: base generation_config only lists
                 # <|endoftext|>, but SFT teaches <|im_end|> — without this the
                 # rollout continues past the answer end (2026-09-16 audit).
-                gen_stop_ids = [i for i in (self.actor_tokenizer.eos_token_id,
-                                             self.actor_tokenizer.convert_tokens_to_ids("<|im_end|>"))
-                                if isinstance(i, int) and i >= 0]
                 generated = self.actor.generate(
+                    generation_config=GenerationConfig(),
                     **sub, do_sample=True, temperature=self.cfg.temperature,
                     top_p=self.cfg.top_p, top_k=self.cfg.top_k,
                     max_new_tokens=self.cfg.max_response_tokens,
                     min_new_tokens=self.cfg.min_response_tokens,
                     num_return_sequences=n,
-                    eos_token_id=gen_stop_ids,
+                    eos_token_id=list(self.stop_token_ids),
+                    suppress_tokens=(~self.output_mask).nonzero().flatten().tolist(),
                     pad_token_id=self.actor_tokenizer.pad_token_id,
                     return_dict_in_generate=False)
                 response_chunks.append(generated[:, prompt_width:])
@@ -314,19 +394,32 @@ class VPOTrainer:
         prompt_mask = batch["attention_mask"].repeat_interleave(self.cfg.group_size, dim=0)
         rendered_prompts = [p for p in rendered_prompts for _ in range(self.cfg.group_size)]
         # Generation pads after EOS; retain EOS itself as a valid response token.
-        rmask = torch.ones_like(responses, dtype=torch.bool)
-        eos = self.actor_tokenizer.eos_token_id
-        pad = self.actor_tokenizer.pad_token_id
-        stop_id = eos if eos is not None else pad
-        if stop_id is not None:
-            seen = responses.eq(stop_id).cumsum(-1)
-            rmask = seen.eq(0) | responses.eq(stop_id)
-            # A malformed generation containing only padding still has one token for
-            # stable credit pooling; this is filtered by max-response policy upstream.
-            rmask[:, 0] = True
+        is_stop = torch.zeros_like(responses, dtype=torch.bool)
+        for stop_id in self.stop_token_ids:
+            is_stop |= responses.eq(stop_id)
+        # Include exactly the first stop token, excluding any later pad/eos.
+        seen_before = is_stop.long().cumsum(-1) - is_stop.long()
+        rmask = seen_before.eq(0)
+        finish_reasons = ["stop" if stopped else "length"
+                          for stopped in is_stop.any(-1).tolist()]
         full_mask = torch.cat([prompt_mask, rmask.to(prompt_mask.dtype)], dim=1)
         positions = torch.arange(prompt_width, out.shape[1], device=self.actor_device).expand(out.shape[0], -1)
-        return out, full_mask, positions, responses, rmask, rendered_prompts
+        return out, full_mask, positions, responses, rmask, rendered_prompts, finish_reasons
+
+    def _sampling_logits(self, logits):
+        # Keep the full tensor in model precision. Each probability/credit
+        # reduction divides by temperature only after promoting its FP32 chunk.
+        return sampling_logits(logits,
+                               min_response_tokens=getattr(self.cfg, "min_response_tokens", 0),
+                               stop_token_ids=getattr(self, "stop_token_ids", ()), inplace=True)
+
+    def sampling_manifest(self):
+        support = self.output_mask.nonzero().flatten().tolist()
+        return {"protocol": "full_softmax_with_minimum_stop_mask_v1",
+                "temperature": self.cfg.temperature, "top_p": self.cfg.top_p,
+                "top_k": self.cfg.top_k, "min_tokens": self.cfg.min_response_tokens,
+                "presence_penalty": 0.0, "stop_token_ids": list(self.stop_token_ids),
+                "support_sha256": hashlib.sha256(json.dumps(support).encode()).hexdigest()}
 
     def _reward_batch(self, input_ids, full_mask, positions, responses, rmask, prompts=None):
         """Build Skywork-formatted RM inputs while preserving generated token IDs."""
@@ -398,32 +491,145 @@ class VPOTrainer:
         B, T = responses.shape
         result = torch.zeros((B, T), dtype=torch.float32, device=self.actor_device)
         micro = max(1, int(self.cfg.microbatch_responses))
-        switched = adapter is not None
+        switched = adapter not in {None, "base", "initial_model"}
         if switched:
             self.actor.set_adapter(adapter)
+        model = (self.reference_actor if adapter == "initial_model" else self.actor)
+        context = self.actor.disable_adapter() if adapter == "base" else nullcontext()
         try:
-            for start in range(0, B, micro):
-                end = min(B, start + micro)
-                logits = actor_response_logits(self.actor, input_ids[start:end], attention_mask[start:end],
-                                               positions[start:end], response_mask[start:end],
-                                               output_mask=self.output_mask)
-                z = logits.float()
-                safe = responses[start:end].masked_fill(~response_mask[start:end], 0)
-                result[start:end] = z.gather(-1, safe[..., None]).squeeze(-1) - z.logsumexp(-1)
-                if entropy_out is not None:
-                    logz = z.logsumexp(-1, keepdim=True)
-                    lp = z - logz
-                    p = lp.exp()
-                    # p==0 at -inf-masked vocab rows; 0*(-inf) would be NaN.
-                    entropy_out[start:end] = -torch.where(
-                        p > 0, p * lp, torch.zeros_like(p)).sum(-1).masked_fill(
-                        ~response_mask[start:end], 0)
-                    del p, lp, logz
-                del logits, z
+            with context:
+                for start in range(0, B, micro):
+                    end = min(B, start + micro)
+                    logits = actor_response_logits(model, input_ids[start:end], attention_mask[start:end],
+                                                   positions[start:end], response_mask[start:end],
+                                                   output_mask=self.output_mask)
+                    logits = self._sampling_logits(logits)
+                    z = logits.float() / getattr(self.cfg, "temperature", 1.0)
+                    safe = responses[start:end].masked_fill(~response_mask[start:end], 0)
+                    result[start:end] = z.gather(-1, safe[..., None]).squeeze(-1) - z.logsumexp(-1)
+                    if entropy_out is not None:
+                        logz = z.logsumexp(-1, keepdim=True)
+                        lp = z - logz
+                        p = lp.exp()
+                        entropy_out[start:end] = -torch.where(
+                            p > 0, p * lp, torch.zeros_like(p)).sum(-1).masked_fill(
+                            ~response_mask[start:end], 0)
+                        del p, lp, logz
+                    del logits, z
         finally:
             if switched:
                 self.actor.set_adapter("default")
         return result
+
+    def _reference_logp(self, *args):
+        adapter = self.reference_adapter if self.reference_actor is None else "initial_model"
+        return self._old_logp_microbatch(*args, adapter=adapter)
+
+    def _response_degeneracy(self, responses, rmask):
+        from .length_reward import response_degeneracy
+        stop = set(self.stop_token_ids)
+        texts = [self.actor_tokenizer.decode(
+            [x for x in row[valid].detach().cpu().tolist() if x not in stop],
+            skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            for row, valid in zip(responses, rmask)]
+        empty, repeated = response_degeneracy(texts, self.cfg.degenerate_newline_run)
+        return (torch.tensor(empty, device=self.reward_device, dtype=torch.bool),
+                torch.tensor(repeated, device=self.reward_device, dtype=torch.bool))
+
+    @torch.no_grad()
+    def prepare_length_reward(self, prompts: Sequence[str]):
+        """Freeze an initial-policy RM scale before the first optimizer update.
+
+        Calibration uses the same sampler and exact RM token formatting as training.
+        It consumes the sampler RNG stream, but performs no updates and does not
+        increment the training rollout/token counters. Explicit sigma0 lets all
+        comparison arms share one independently recorded calibration.
+        """
+        if self.cfg.length_reward_mode != "soft":
+            return None
+        if self.length_reward_calibration is not None:
+            return self.length_reward_calibration
+        if self.rollout_index:
+            raise RuntimeError("Length reward calibration must precede all training updates")
+        from .length_reward import calibrate_reward_scale
+        started = time.monotonic()
+        record = {"mode": "soft", "sigma0": self.cfg.length_reward_sigma0,
+                  "source": "explicit" if self.cfg.length_reward_sigma0 is not None else "initial_policy",
+                  "calibration_prompt_count": 0, "group_size": self.cfg.group_size,
+                  "seed": self.cfg.seed, "model": self.cfg.model_name,
+                  "init_adapter": self.cfg.init_adapter, "reward_model": self.cfg.reward_model_name,
+                  "sampling": self.sampling_manifest(),
+                  "reward_format": "reward_chat_generation_prefix_plus_exact_response_tokens_v1",
+                  "length_counting": "generated tokens including EOS, excluding prompt and padding",
+                  "rng_policy": "calibration consumes sampler RNG before training",
+                  "short_response_threshold": self.cfg.short_response_threshold,
+                  "long_response_threshold": self.cfg.long_response_threshold,
+                  "max_response_tokens": self.cfg.max_response_tokens,
+                  "short_penalty_strength": self.cfg.short_penalty_strength,
+                  "long_penalty_strength": self.cfg.long_penalty_strength,
+                  "advantage_std_floor_fraction": self.cfg.advantage_std_floor_fraction}
+        if self.cfg.length_reward_sigma0 is None:
+            unique = list(dict.fromkeys(prompts))
+            count = self.cfg.length_calibration_prompts
+            if len(unique) < count:
+                raise ValueError(f"Calibration requires {count} distinct training prompts; got {len(unique)}")
+            chosen = random.Random(self.cfg.seed).sample(unique, count)
+            scores, groups, valid_rows, details = [], [], [], []
+            old_method = self.cfg.method
+            was_training = self.actor.training
+            try:
+                # Even VPO needs only forward RM scores during calibration.
+                self.cfg.method = "grpo"
+                for start in range(0, count, self.cfg.prompts_per_rollout):
+                    batch_prompts = chosen[start:start + self.cfg.prompts_per_rollout]
+                    rollout = self.rollout(batch_prompts)
+                    ids, mask, positions, responses, rmask, _, reasons = rollout
+                    self._validate_rollout(rollout, len(batch_prompts))
+                    rewards, *_ = self._reward_batch(ids, mask, positions, responses, rmask,
+                        [p for p in batch_prompts for _ in range(self.cfg.group_size)])
+                    empty, repeated = self._response_degeneracy(responses, rmask)
+                    valid = torch.tensor([x == "stop" for x in reasons], device=rewards.device) & ~(empty | repeated)
+                    for j, (reward, is_valid) in enumerate(zip(rewards.tolist(), valid.tolist())):
+                        group = start + j // self.cfg.group_size
+                        scores.append(reward); groups.append(group); valid_rows.append(is_valid)
+                        details.append({"group": group, "reward": reward, "valid": is_valid,
+                                        "length": int(rmask[j].sum()), "finish_reason": reasons[j]})
+                sigma0 = calibrate_reward_scale(torch.tensor(scores), torch.tensor(groups),
+                                                torch.tensor(valid_rows, dtype=torch.bool))
+            finally:
+                self.cfg.method = old_method
+                self.actor.train(was_training)
+            self.cfg.length_reward_sigma0 = sigma0
+            record.update(sigma0=sigma0, calibration_prompt_count=count, responses=details,
+                          prompt_sha256=[hashlib.sha256(p.encode()).hexdigest() for p in chosen])
+        record["elapsed_sec"] = time.monotonic() - started
+        (Path(self.cfg.output_dir) / "length_reward_calibration.json").write_text(
+            json.dumps(record, indent=2, allow_nan=False))
+        self.length_reward_calibration = record
+        return record
+
+    def _validate_rollout(self, rollout, prompt_count):
+        ids, mask, positions, responses, rmask, rendered, reasons = rollout
+        expected = prompt_count * self.cfg.group_size
+        if len(responses) != expected or len(rendered) != expected or len(reasons) != expected:
+            raise ValueError("Rollout must contain complete prompt groups")
+        if any(x not in {"stop", "length"} for x in reasons):
+            raise ValueError("Every response requires an explicit stop or length finish reason")
+        lengths = rmask.sum(-1)
+        if bool(((lengths < 1) | (lengths > self.cfg.max_response_tokens)).any()):
+            raise ValueError("Invalid response length")
+        check_response_tokens(ids, mask, positions, responses, rmask)
+        valid_ids = responses[rmask]
+        if ((valid_ids < 0) | (valid_ids >= self.output_mask.numel())).any() or not self.output_mask[valid_ids].all():
+            raise ValueError("Sampled tokens must belong to the policy output support")
+
+    def _write_rollout_artifacts(self, prompts, rollout):
+        out = Path(self.cfg.output_dir)
+        step = self.rollout_index + 1
+        rows = [] if rollout is None else [row[valid].detach().cpu().tolist()
+                                           for row, valid in zip(rollout[3], rollout[4])]
+        (out / f"rollout-{step}-tokens.json").write_text(json.dumps(rows))
+        (out / f"rollout-{step}-prompts.json").write_text(json.dumps(list(prompts)))
 
     def train_rollout(self, prompts: Sequence[str]) -> dict[str, float]:
         def elapsed_phase(start):
@@ -436,13 +642,44 @@ class VPOTrainer:
 
         t0 = time.monotonic()
         phase = {}
+        soft = self.cfg.length_reward_mode == "soft"
+        if soft:
+            if self.cfg.length_reward_sigma0 is None:
+                raise RuntimeError("Call prepare_length_reward(training_prompts) before training to calibrate sigma0")
+            self.prepare_length_reward([])
         # Release gradients from the preceding optimizer step before allocating
         # rollout logits/KV caches (critical for long 64-response runs).
         self.optimizer.zero_grad(set_to_none=True)
         if self.actor_device.type == "cuda":
             torch.cuda.empty_cache()
         tp = time.monotonic()
-        input_ids, full_mask, positions, responses, rmask, rendered = self.rollout(prompts)
+        if soft:
+            from .rollout_selection import select_training_rollout
+            rollout, prompts, selection_stats = select_training_rollout(self, prompts)
+        else:
+            rollout = self.rollout(prompts)
+            selection_stats = {"resampled_groups": 0, "skipped_groups": 0,
+                               "input_prompt_groups": len(prompts), "kept_prompt_groups": len(prompts),
+                               "generated_response_tokens": int(rollout[4].sum())}
+        self._write_rollout_artifacts(prompts, rollout)
+        if rollout is None:
+            # No response reaches the loss, including KL, Adam moments or weight decay.
+            self.rollout_index += 1
+            metrics = {"rollout": self.rollout_index, "skipped_rollout": True,
+                       "optimizer_steps": 0, "response_tokens": 0, "reward_count": 0,
+                       "loss": 0., "elapsed_sec": time.monotonic() - t0,
+                       "gpu_hours": (time.monotonic() - self._started) * self.cfg.allocated_gpu_count / 3600,
+                       "phase_generation_sec": elapsed_phase(tp), **selection_stats}
+            self._log(metrics)
+            if self.rollout_index % self.cfg.checkpoint_interval == 0:
+                self.save_checkpoint(self.rollout_index)
+            return metrics
+        input_ids, full_mask, positions, responses, rmask, rendered, finish_reasons = rollout
+        if len(finish_reasons) != responses.shape[0] or any(x not in {"stop", "length"} for x in finish_reasons):
+            raise ValueError("Every response requires an explicit stop or length finish reason")
+        valid_ids = responses[rmask]
+        if ((valid_ids < 0) | (valid_ids >= self.output_mask.numel())).any() or not self.output_mask[valid_ids].all():
+            raise ValueError("Sampled tokens must belong to the policy output support")
         phase["generation_sec"] = elapsed_phase(tp)
         old_logits = None
         if self.cfg.method == "vpo_rm":
@@ -450,6 +687,7 @@ class VPOTrainer:
             with torch.no_grad():
                 old_logits = actor_response_logits(self.actor, input_ids, full_mask, positions, rmask,
                                                    output_mask=self.output_mask)
+                old_logits = self._sampling_logits(old_logits)
             phase["actor_old_logits_sec"] = elapsed_phase(tp)
         tp = time.monotonic()
         rewards, grads, rid, rmask_full = self._reward_batch(
@@ -460,36 +698,67 @@ class VPOTrainer:
         B = rewards.shape[0]
         group_ids = torch.arange(B, device=self.reward_device) // self.cfg.group_size
         from .core import group_advantages, guard_degenerate_rewards
-        # Anti-reward-hacking layer 2: under-length responses (below
-        # min_response_tokens, unreachable in normal operation because the
-        # vLLM server enforces min_tokens) are floored below their group
-        # minimum so they can never earn positive advantage.  p9d4 showed the
-        # Skywork RM scores a bare stop token 7.7 — above real answers.
         lengths_dev = rmask.sum(-1).to(rewards.device)
-        # Calibrated length debias (p9g): the RM pays ~3.4 points per 1000
-        # tokens of shortness on real answers (regression over the healthy
-        # phases of p9d4/p9e/p9f, n=140).  Subtract 1.5x that slope below the
-        # 600-token anchor so the short-answer slide stops paying; above the
-        # anchor nothing changes.  Truncated (overlong) responses are floored
-        # below their group minimum alongside the under-length guard.
-        length_penalty = torch.zeros_like(rewards)
-        if self.cfg.length_penalty_slope > 0:
-            shortfall = (self.cfg.length_penalty_anchor - lengths_dev).clamp_min(0)
-            length_penalty = self.cfg.length_penalty_slope * shortfall.float()
-            rewards = rewards - length_penalty
-        truncated = lengths_dev >= (self.cfg.max_response_tokens - 1)
-        rewards, n_degenerate = guard_degenerate_rewards(
-            rewards, lengths_dev, group_ids,
-            self.cfg.min_response_tokens, self.cfg.degenerate_penalty,
-            also_floor=truncated if self.cfg.length_penalty_slope > 0 else None)
+        raw_rewards = rewards.detach().clone()
+        short_penalty = torch.zeros_like(rewards)
+        long_penalty = torch.zeros_like(rewards)
+        truncated = torch.tensor([reason == "length" for reason in finish_reasons],
+                                 device=rewards.device, dtype=torch.bool)
+        empty = torch.zeros_like(truncated)
+        repeated = torch.zeros_like(truncated)
+        if soft:
+            from .length_reward import soft_length_penalties
+            short_penalty, long_penalty = soft_length_penalties(
+                lengths_dev, self.cfg.length_reward_sigma0,
+                short_threshold=self.cfg.short_response_threshold,
+                long_threshold=self.cfg.long_response_threshold,
+                max_length=self.cfg.max_response_tokens,
+                short_strength=self.cfg.short_penalty_strength,
+                long_strength=self.cfg.long_penalty_strength)
+            rewards = rewards - short_penalty - long_penalty
+            empty, repeated = self._response_degeneracy(responses, rmask)
+            # Only actual degeneration gets a hard floor; short nonempty answers
+            # and true truncations retain their softly shaped reward.
+            flags = empty | repeated
+            n_degenerate = int(flags.sum())
+            rewards = rewards.clone()
+            for group in group_ids.unique():
+                members = group_ids == group
+                flagged = members & flags
+                if bool(flagged.any()):
+                    good = members & ~flags
+                    if not bool(good.any()):
+                        raise RuntimeError("An entirely degenerate group escaped rollout selection")
+                    rewards[flagged] = rewards[good].min() - self.cfg.degenerate_penalty
+            advantages, scales = group_advantages(
+                rewards, group_ids,
+                std_floor=self.cfg.advantage_std_floor_fraction * self.cfg.length_reward_sigma0)
+        else:
+            # Preserve the historical experiment's below-anchor cost and floor.
+            if self.cfg.length_penalty_slope > 0:
+                short_penalty = self.cfg.length_penalty_slope * (
+                    self.cfg.length_penalty_anchor - lengths_dev).clamp_min(0).float()
+                rewards = rewards - short_penalty
+            rewards, n_degenerate = guard_degenerate_rewards(
+                rewards, lengths_dev, group_ids,
+                max(1, self.cfg.min_response_tokens), self.cfg.degenerate_penalty,
+                also_floor=truncated if self.cfg.length_penalty_slope > 0 else None)
+            advantages, scales = group_advantages(rewards, group_ids)
+        length_penalty = short_penalty + long_penalty
         if n_degenerate:
-            print(f"[reward-guard] {n_degenerate}/{B} responses under "
-                  f"{self.cfg.min_response_tokens} tokens floored below group min", flush=True)
+            print(f"[reward-guard] {n_degenerate}/{B} flagged responses floored", flush=True)
         mean_len = float(lengths_dev.float().mean())
         if mean_len < self.cfg.min_response_tokens:
             print(f"[reward-guard] WARNING mean response length {mean_len:.1f} below "
                   f"{self.cfg.min_response_tokens} — degenerate policy suspected", flush=True)
-        advantages, scales = group_advantages(rewards, group_ids)
+        reward_rows = [{"length": int(lengths_dev[i]), "finish_reason": finish_reasons[i],
+                        "raw_reward": float(raw_rewards[i]), "short_penalty": float(short_penalty[i]),
+                        "long_penalty": float(long_penalty[i]), "reward": float(rewards[i]),
+                        "advantage": float(advantages[i]), "scale": float(scales[i]),
+                        "empty": bool(empty[i]), "newline_degenerate": bool(repeated[i])}
+                       for i in range(B)]
+        (Path(self.cfg.output_dir) / f"rollout-{self.rollout_index + 1}-rewards.json").write_text(
+            json.dumps(reward_rows, allow_nan=False))
         ref_logp = None
         entropy = None
         if self.cfg.method == "vpo_rm":
@@ -500,13 +769,16 @@ class VPOTrainer:
                                        rmask, self.cfg.tau, credit_lambda=self.cfg.credit_lambda,
                                        freeze_stop_tokens=self.cfg.freeze_stop_tokens,
                                        freeze_structural=self.cfg.freeze_structural,
+                                       stop_token_ids=self.stop_token_ids,
+                                       structural_token_ids=self.structural_token_ids,
+                                       policy_temperature=self.cfg.temperature,
+                                       min_response_tokens=self.cfg.min_response_tokens,
                                        token_chunk_size=self.cfg.token_chunk_size,
                                        vocab_chunk_size=self.cfg.vocab_chunk_size)
             phase["credit_cache_sec"] = elapsed_phase(tp)
             if self.cfg.kl_reference == "init":
                 tp = time.monotonic()
-                ref_logp = self._old_logp_microbatch(input_ids, full_mask, positions,
-                                                     responses, rmask, adapter="ref")
+                ref_logp = self._reference_logp(input_ids, full_mask, positions, responses, rmask)
                 phase["ref_logp_sec"] = elapsed_phase(tp)
             # Rollout-policy entropy for collapse monitoring, from the already
             # materialized old logits (no extra forward).
@@ -516,7 +788,7 @@ class VPOTrainer:
                 chunk = max(1, int(self.cfg.token_chunk_size)) * 4
                 for lo in range(0, rows.numel(), chunk):
                     r, t = rows[lo:lo + chunk], times[lo:lo + chunk]
-                    z = old_logits[r, t].float()
+                    z = old_logits[r, t].float() / self.cfg.temperature
                     logz = z.logsumexp(-1, keepdim=True)
                     lp = z - logz
                     p = lp.exp()
@@ -529,8 +801,7 @@ class VPOTrainer:
             old_logp = self._old_logp_microbatch(input_ids, full_mask, positions, responses, rmask,
                                                  entropy_out=entropy)
             if self.cfg.kl_reference == "init":
-                ref_logp = self._old_logp_microbatch(input_ids, full_mask, positions,
-                                                     responses, rmask, adapter="ref")
+                ref_logp = self._reference_logp(input_ids, full_mask, positions, responses, rmask)
             phase["actor_old_logp_sec"] = elapsed_phase(tp)
             phase["credit_cache_sec"] = 0.0
             token_adv = advantages.to(self.actor_device)[:, None].expand_as(rmask)
@@ -545,61 +816,89 @@ class VPOTrainer:
         if self.actor_device.type == "cuda":
             torch.cuda.empty_cache()
         tp = time.monotonic()
-        self.actor.train(); self.optimizer.zero_grad(set_to_none=True)
-        # Accumulate gradients over response microbatches while keeping the complete
-        # prompt group in the cached credit.  Weighting by chunk size reproduces the
-        # configured mean-over-responses reduction exactly, then performs one update.
+        self.actor.train()
+        # Group advantages, attribution and old/reference probabilities remain
+        # frozen across all configured optimizer minibatches and policy epochs.
         micro = max(1, int(self.cfg.microbatch_responses))
+        minibatch = self.cfg.optimizer_minibatch_responses
         loss_value = 0.0
+        optimizer_steps = 0
+        grad_norm = 0.0
         check_response_tokens(input_ids, full_mask, positions, responses, rmask)
-        for start in range(0, B, micro):
-            end = min(B, start + micro)
-            sl = slice(start, end)
-            # One teacher-forced forward feeds both the clipped policy loss and the
-            # KL estimator.  A separate KL forward recomputed identical logits
-            # (dropout is zero) while keeping a second activation graph alive.
-            new_logits = actor_response_logits(
-                self.actor, input_ids[sl], full_mask[sl], positions[sl], rmask[sl],
-                output_mask=self.output_mask)
-            new_logp = selected_logp_from_logits(new_logits, responses[sl], rmask[sl])
-            chunk_loss = grpo_policy_loss(new_logp, cache.old_logp[sl],
-                                          cache.credit.advantage[sl], rmask[sl],
-                                          self.cfg.clip_eps)
-            if self.cfg.beta:
-                # KL reference: the rollout policy (per-step stabilizer, legacy)
-                # or the frozen SFT initialization (p9g anchor against drift
-                # and degenerate modes).  The k3 estimator stays >= 0.
-                base_logp = (ref_logp[sl] if ref_logp is not None
-                             else cache.old_logp[sl].detach())
-                delta = base_logp - new_logp
-                kl = (delta.exp() - delta - 1).masked_fill(~rmask[sl], 0)
-                chunk_loss = chunk_loss + self.cfg.beta * (kl.sum(-1) / rmask[sl].sum(-1)).mean()
-            weight = (end - start) / B
-            (chunk_loss * weight).backward()
-            loss_value += float(chunk_loss.detach()) * weight
-            del chunk_loss, new_logp
-            if self.cfg.beta:
-                del delta, kl
-        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm))
-        self.optimizer.step()
+        if not torch.isfinite(cache.old_logp[rmask]).all():
+            raise ValueError("Sampled tokens must have finite probability in the sampling support")
+        if ref_logp is not None and not torch.isfinite(ref_logp[rmask]).all():
+            raise ValueError("Initial reference log probabilities must be finite on sampled support")
+        for _epoch in range(self.cfg.policy_epochs_per_rollout):
+            for batch_start in range(0, B, minibatch):
+                batch_end = min(B, batch_start + minibatch)
+                self.optimizer.zero_grad(set_to_none=True)
+                for start in range(batch_start, batch_end, micro):
+                    end = min(batch_end, start + micro)
+                    sl = slice(start, end)
+                    new_logits = actor_response_logits(
+                        self.actor, input_ids[sl], full_mask[sl], positions[sl], rmask[sl],
+                        output_mask=self.output_mask)
+                    new_logits = self._sampling_logits(new_logits)
+                    new_logp = selected_logp_from_logits(new_logits, responses[sl], rmask[sl],
+                                                         policy_temperature=self.cfg.temperature)
+                    chunk_loss = grpo_policy_loss(new_logp, cache.old_logp[sl],
+                                                  cache.credit.advantage[sl], rmask[sl],
+                                                  self.cfg.clip_eps)
+                    if self.cfg.beta:
+                        base_logp = ref_logp[sl] if ref_logp is not None else cache.old_logp[sl]
+                        delta = (base_logp.masked_fill(~rmask[sl], 0)
+                                 - new_logp.masked_fill(~rmask[sl], 0))
+                        kl = torch.expm1(delta) - delta
+                        chunk_loss = chunk_loss + self.cfg.beta * (kl.sum(-1) / rmask[sl].sum(-1)).mean()
+                    if not torch.isfinite(chunk_loss):
+                        self.optimizer.zero_grad(set_to_none=True)
+                        raise ValueError("Non-finite actor loss; optimizer step cancelled")
+                    weight = (end - start) / (batch_end - batch_start)
+                    (chunk_loss * weight).backward()
+                    loss_value += float(chunk_loss.detach()) * (end - start) / B / self.cfg.policy_epochs_per_rollout
+                    del chunk_loss, new_logp, new_logits
+                    if self.cfg.beta:
+                        del delta, kl
+                # Never let Adam moments or actor parameters absorb a nonfinite
+                # gradient, including one produced by an otherwise finite loss.
+                norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
+                if not torch.isfinite(norm):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    raise ValueError("Non-finite actor gradients; optimizer step cancelled")
+                grad_norm = max(grad_norm, float(norm))
+                self.optimizer.step()
+                optimizer_steps += 1
         phase["actor_update_sec"] = elapsed_phase(tp)
         self.total_tokens += int(rmask.sum().item())
         self.rollout_index += 1
+        reference_kl = 0.0
+        if ref_logp is not None:
+            delta = (ref_logp - cache.old_logp).masked_fill(~rmask, 0)
+            reference_kl = float((torch.expm1(delta) - delta).sum() / rmask.sum())
         metrics = {"rollout": self.rollout_index, "loss": loss_value,
+                   "skipped_rollout": False, "reward_count": B,
+                   "optimizer_steps": optimizer_steps,
+                   "raw_reward_mean": float(raw_rewards.mean()),
                    "reward_mean": float(rewards.mean()), "reward_std": float(rewards.std(correction=0)),
                    "response_tokens": int(rmask.sum()), "grad_norm": grad_norm,
                    "degenerate_responses": n_degenerate,
                    "mean_response_tokens": mean_len,
                    "length_penalty_mean": float(length_penalty.mean()),
+                   "short_penalty_mean": float(short_penalty.mean()),
+                   "long_penalty_mean": float(long_penalty.mean()),
+                   "empty_responses": int(empty.sum()), "newline_degenerate_responses": int(repeated.sum()),
                    "truncated_responses": int(truncated.sum()),
                    "response_entropy": float((entropy.sum() / rmask.sum().clamp_min(1)).item())
                    if entropy is not None else 0.0,
-                   "kl_to_init": float((ref_logp - cache.old_logp).masked_fill(~rmask, 0).sum()
-                                       / rmask.sum().clamp_min(1)) if ref_logp is not None else 0.0,
+                   "kl_to_init": reference_kl,
                    "group_sigma_mean": float(scales.mean()), "group_sigma_min": float(scales.min()),
                    "group_sigma_max": float(scales.max()),
                    "elapsed_sec": time.monotonic() - t0,
-                   "gpu_hours": (time.monotonic() - self._started) * 2 / 3600}
+                   "gpu_hours": (time.monotonic() - self._started) * self.cfg.allocated_gpu_count / 3600}
+        metrics.update(selection_stats)
+        if soft:
+            metrics["length_reward_sigma0"] = self.cfg.length_reward_sigma0
         metrics.update({f"phase_{k}": v for k, v in phase.items()})
         if self.cfg.method == "vpo_rm":
             w = cache.credit.weight.float().masked_fill(~rmask, 0)
@@ -669,7 +968,9 @@ class VPOTrainer:
         torch.save(state, path / "trainer_state.pt")
         manifest = {"resolved_config": asdict(self.cfg),
             "model": self.cfg.model_name, "reward_model": self.cfg.reward_model_name,
-            "step": step, "total_tokens": self.total_tokens}
+            "step": step, "total_tokens": self.total_tokens,
+            "sampling": self.sampling_manifest(), "resume_supported": False,
+            "gpu_hours_definition": "elapsed_since_trainer_initialization_times_allocated_gpu_count"}
         if self.data_split is not None:
             manifest["data_split"] = self.data_split
         try:
@@ -685,6 +986,7 @@ class VPOTrainer:
         prompts = list(prompts)
         if not prompts:
             raise ValueError("No prompts supplied")
+        self.prepare_length_reward(prompts)
         for _ in range(self.cfg.rollout_iterations):
             k = self.cfg.prompts_per_rollout
             start = (self.rollout_index * k) % len(prompts)
@@ -694,7 +996,8 @@ class VPOTrainer:
 
 
 def load_prompt_dataset(name: str, split: str = "train_prefs", field: str = "prompt",
-                        validation_size: int = 2000, dataset_path: str | None = None):
+                        validation_size: int = 2000, dataset_path: str | None = None,
+                        exclude_benchmarks: bool = False, benchmark_paths=None):
     # Some inference-oriented images expose a namespace-only ``datasets``
     # package.  Local parquet input should remain usable without requiring the
     # full Hugging Face datasets stack (and without network access).
@@ -713,25 +1016,45 @@ def load_prompt_dataset(name: str, split: str = "train_prefs", field: str = "pro
         from datasets import load_dataset
         ds = load_dataset(name, split=split)
         values = (row[field] for row in ds)
+    exclusion = None
+    if exclude_benchmarks:
+        from .data import exclude_benchmark_prompts
+        values, exclusion = exclude_benchmark_prompts(values, benchmark_paths=benchmark_paths)
     train, valid, hashes = split_prompts(values, validation_size)
+    if exclusion is not None:
+        hashes["benchmark_exclusion"] = exclusion
     return train, valid, hashes
 
 
 def main(argv=None):
+    from .length_reward_cli import add_length_reward_args, length_reward_config_kwargs
+
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=TrainerConfig.model_name); p.add_argument("--rm", default=TrainerConfig.reward_model_name)
     p.add_argument("--output-dir", default="runs/skywork"); p.add_argument("--method", choices=["grpo", "vpo_rm"], default="vpo_rm")
     p.add_argument("--smoke", action="store_true"); p.add_argument("--prompts-file")
     p.add_argument("--dataset-path", help="local train_prefs parquet (avoids network download)")
+    p.add_argument("--init-adapter", default="", help="SFT LoRA adapter used to initialize the actor")
+    add_length_reward_args(p)
     args = p.parse_args(argv)
     cfg = TrainerConfig(model_name=args.model, reward_model_name=args.rm, output_dir=args.output_dir,
-                        method=args.method, smoke=args.smoke)
+                        method=args.method, smoke=args.smoke, init_adapter=args.init_adapter,
+                        **length_reward_config_kwargs(args))
     if args.prompts_file:
         prompts = [x.strip() for x in Path(args.prompts_file).read_text().splitlines() if x.strip()]
+        from .data import exclude_benchmark_prompts
+        prompts, exclusion = exclude_benchmark_prompts(prompts)
+        validation_size = min(cfg.validation_size, max(0, len(set(map(normalize_prompt, prompts))) - 1))
+        prompts, _, split_meta = split_prompts(prompts, validation_size=validation_size)
+        split_meta["benchmark_exclusion"] = exclusion
     else:
-        prompts, _, _ = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized",
-                                            dataset_path=args.dataset_path)
+        prompts, _, split_meta = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized",
+                                            dataset_path=args.dataset_path, exclude_benchmarks=True)
     trainer = VPOTrainer.from_pretrained(cfg)
+    prompts = trainer.filter_prompts(prompts)
+    trainer.data_split = dict(split_meta, filtered_train_prompts=len(prompts),
+                              dropped_train_prompts=trainer.filtered_prompt_count)
+    (Path(cfg.output_dir) / "data_split.json").write_text(json.dumps(trainer.data_split, indent=2))
     trainer.train(prompts)
 
 

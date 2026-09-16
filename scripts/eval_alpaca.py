@@ -23,6 +23,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
+                                    eval_config, fingerprint, validate_outputs, validate_adapter_base)
+import math
 
 
 def parse_recipe(spec: str) -> dict:
@@ -30,7 +33,8 @@ def parse_recipe(spec: str) -> dict:
     if len(parts) != 4:
         raise ValueError(f"recipe '{spec}' must be temp:n_samples:top_p:top_k")
     temp, n, top_p, top_k = float(parts[0]), int(parts[1]), float(parts[2]), int(parts[3])
-    if temp < 0 or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1:
+    if (not math.isfinite(temp) or (temp != 0 and not 0.01 <= temp <= 2.0)
+            or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1):
         raise ValueError(f"out-of-range values in recipe '{spec}'")
     if temp == 0.0 and n > 1:
         raise ValueError(f"greedy (temp 0) cannot draw {n} distinct samples: '{spec}'")
@@ -43,12 +47,23 @@ def parse_adapters(specs):
         if "=" not in spec:
             raise ValueError(f"adapter spec '{spec}' must be TAG=PATH (or TAG=none)")
         tag, path = spec.split("=", 1)
-        if not tag or not path:
+        if not tag or not path or Path(tag).name != tag or tag in ('.', '..') or any(t == tag for t, _ in out):
             raise ValueError(f"empty tag or path in '{spec}'")
         out.append((tag, path))
     if not out:
         raise ValueError("no adapters given")
     return out
+
+
+def generation_rows(data, outputs, n_samples):
+    validate_outputs(outputs, len(data), n_samples)
+    return [{"idx": j, "sample_idx": s, "instruction": row["instruction"],
+             "response": sample.text, "response_tokens": len(sample.token_ids),
+             "finish_reason": getattr(sample, "finish_reason", None),
+             "stop_reason": getattr(sample, "stop_reason", None),
+             "last_token_id": sample.token_ids[-1] if sample.token_ids else None}
+            for j, (row, output) in enumerate(zip(data, outputs))
+            for s, sample in enumerate(output.outputs)]
 
 
 def run_selftest(args) -> None:
@@ -110,56 +125,64 @@ def main():
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from transformers import AutoTokenizer, AutoConfig
+    from vpo_rm.integration import (checked_sampling_params, sampling_summary,
+                                    vllm_support_kwargs)
     from vpo_rm.trainer import VPOTrainer
+    from vpo_rm.token_policy import get_stop_token_ids
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    stop_ids = get_stop_token_ids(tokenizer)
+    model_fingerprint = fingerprint(args.model, full_weights=False)
     rendered = [VPOTrainer._render_chat_prompt(tokenizer, row["instruction"]) for row in data]
 
-    known = set(tokenizer.get_vocab().values())
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
-    banned = {i: -100.0 for i in range(vocab_size) if i not in known}
+    support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
+    support_summary = sampling_summary(support_kwargs)
 
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True,
-              enable_lora=True, max_lora_rank=64, max_loras=4,
-              max_model_len=4096, max_num_seqs=64,
-              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+    llm = None
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, (tag, path) in enumerate(adapters):
+        validate_adapter_base(path, args.model)
         lora = None if path == "none" else LoRARequest(f"lora-{tag}", i + 1, str(Path(path)))
         tag_dir = out_dir / tag
         tag_dir.mkdir(parents=True, exist_ok=True)
 
+        adapter_fingerprint = None if path == 'none' else fingerprint(path)
         for recipe in recipes:
             rectag = f"t{recipe['temp']}_n{recipe['n']}"
             gen_path = tag_dir / f"generations_{rectag}.jsonl"
-            if gen_path.exists():
-                print(f"[{tag}/{rectag}] generations exist, skipping", flush=True)
+            manifest = tag_dir / f'manifest_{rectag}.json'
+            config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint,
+                                 stop_ids, 'alpaca', support_summary)
+            if cache_matches(manifest, config, [gen_path]):
+                print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
-            params = SamplingParams(
+            if llm is None:
+                llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
+              enable_lora=True, max_lora_rank=64, max_loras=4,
+              max_model_len=4096, max_num_seqs=64,
+              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+            params = checked_sampling_params(SamplingParams,
                 temperature=recipe["temp"], top_p=recipe["top_p"],
                 top_k=recipe["top_k"], n=recipe["n"],
                 max_tokens=args.max_tokens, seed=args.seed,
-                stop_token_ids=[151643, 151645], logit_bias=banned)
+                stop_token_ids=list(stop_ids), **support_kwargs)
             outputs = llm.generate(rendered, params, lora_request=lora)
-            n_actual = len(outputs[0].outputs)
-            if n_actual != recipe["n"]:
-                raise RuntimeError(f"vLLM returned {n_actual} samples, expected {recipe['n']}")
+            validate_outputs(outputs, len(data), recipe['n'])
+            n_actual = recipe['n']
 
-            lens = [len(o.outputs[0].token_ids) for o in outputs]
+            rows = generation_rows(data, outputs, n_actual)
+            lens = [r["response_tokens"] for r in rows]
             n_trunc = sum(t >= args.max_tokens for t in lens)
             print(f"\n{'=' * 50}")
             print(f"  AlpacaEval [{tag} / {rectag}] max_tokens={args.max_tokens} — adapter: {path}")
             print(f"  response tokens: mean {sum(lens)/len(lens):.0f}, "
                   f"pinned at cap {n_trunc}/{len(lens)} ({n_trunc/len(lens):.1%})")
 
-            gen_path.write_text("\n".join(json.dumps({
-                "idx": j,
-                "instruction": data[j]["instruction"],
-                "response": outputs[j].outputs[0].text,
-                "response_tokens": lens[j],
-            }, ensure_ascii=False) for j in range(len(data))))
+            atomic_text(gen_path, "\n".join(json.dumps(row, ensure_ascii=False) for row in rows))
+            commit_cache(manifest, config, [gen_path])
             print(f"  Saved to {gen_path}", flush=True)
 
     print("\nDone.")

@@ -20,14 +20,14 @@ import argparse
 import json
 import statistics
 from pathlib import Path
+import sys
 
 import torch
 
-# Must mirror the freeze set in vpo_rm/core.py::allocate().
-STRUCTURAL_IDS = {198, 271, 143973, 6762,   # \n, \n\n, .\n\n
-                  5687,                     # .\n
-                  147950, 53990, 141437}    # \n\n\n, ", " variants
-STOP_IDS = {151643, 151645}                # <|endoftext|>, <|im_end|>
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from vpo_rm.token_policy import get_stop_token_ids, get_structural_token_ids
 
 
 def main():
@@ -35,10 +35,25 @@ def main():
     p.add_argument("--run", required=True, help="training run dir with rollout dumps")
     p.add_argument("--out", required=True, help="output dir for summary.json")
     p.add_argument("--rollouts", type=int, nargs="+", default=[1, 2])
+    p.add_argument("--tokenizer", help="local/cached tokenizer; defaults to the run's recorded actor model")
     args = p.parse_args()
 
     run = Path(args.run)
+    tokenizer_source = args.tokenizer
+    if tokenizer_source is None:
+        manifest_path = run / "profile_manifest.json"
+        if manifest_path.exists():
+            tokenizer_source = json.loads(manifest_path.read_text()).get("config", {}).get("model_name")
+    if not tokenizer_source:
+        p.error("Provide --tokenizer or a profile_manifest.json containing config.model_name")
+    if not Path(tokenizer_source).exists() and (ROOT / tokenizer_source).exists():
+        tokenizer_source = str(ROOT / tokenizer_source)
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=True)
+    stop_ids = set(get_stop_token_ids(tokenizer))
+    structural_ids = set(get_structural_token_ids(tokenizer))
     cats = {"stop": [], "structural": [], "body": []}
+    observed_ids = {category: set() for category in cats}
     pairing_warnings = 0
     used = []
 
@@ -59,12 +74,9 @@ def main():
             if tail.numel() and float(tail.max()) > 0:
                 pairing_warnings += 1
             for t, tok in enumerate(row):
-                if tok in STOP_IDS:
-                    cats["stop"].append(float(d[i, t]))
-                elif tok in STRUCTURAL_IDS:
-                    cats["structural"].append(float(d[i, t]))
-                else:
-                    cats["body"].append(float(d[i, t]))
+                category = "stop" if tok in stop_ids else "structural" if tok in structural_ids else "body"
+                cats[category].append(float(d[i, t]))
+                observed_ids[category].add(tok)
         used.append(n)
 
     if not used:
@@ -75,11 +87,20 @@ def main():
         "run": str(run),
         "rollouts": used,
         "pairing_warnings": pairing_warnings,
+        "tokenizer_source": str(tokenizer_source),
+        "structural_rule": "nonempty whitespace, or newline-containing token that strips to '.'; exclude special tokens",
+        "stop_token_ids": sorted(stop_ids),
+        "structural_token_ids": sorted(structural_ids),
+        "decoded_categories": {
+            category: {str(token_id): tokenizer.decode([token_id], skip_special_tokens=False,
+                                                       clean_up_tokenization_spaces=False)
+                       for token_id in sorted(token_ids)}
+            for category, token_ids in observed_ids.items()},
         "counts": {k: len(v) for k, v in cats.items()},
         "median_abs_d": med,
         "ratio_stop_vs_body": (med["stop"] / body if body else float("nan")),
         "ratio_structural_vs_body": (med["structural"] / body if body else float("nan")),
-        "reference_rm8b": {"ratio_stop_vs_body": "~100x", "ratio_structural_vs_body": "~4-9x"},
+        "historical_reference_note": "Prior structural-token ratios used incorrect token IDs and need recomputation.",
     }
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

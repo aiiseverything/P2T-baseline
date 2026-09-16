@@ -95,3 +95,34 @@ def test_gather_padding_sentinel():
     values = torch.arange(12).reshape(1, 4, 3)
     actual = gather_response(values, torch.tensor([[2,-1]]), torch.tensor([[1,0]]))
     torch.testing.assert_close(actual, torch.tensor([[[6,7,8],[0,0,0]]]))
+
+
+def test_selected_logp_masks_padding_when_safe_id_is_outside_support():
+    from vpo_rm.integration import selected_logp_from_logits
+    raw=torch.randn(1,2,5,requires_grad=True)
+    supported=raw.masked_fill(torch.tensor([True,False,False,False,False]),-torch.inf)
+    mask=torch.tensor([[True,False]])
+    selected=selected_logp_from_logits(supported,torch.tensor([[2,0]]),mask)
+    assert selected[0,1]==0
+    selected.sum().backward()
+    assert torch.isfinite(raw.grad).all()
+    assert raw.grad[0,1].eq(0).all()
+
+
+def test_public_policy_loss_reuses_cached_sampling_temperature_and_stop_support():
+    from vpo_rm.integration import sampling_logits
+    torch.manual_seed(71)
+    actor=GPTNeoXForCausalLM(neox_config()).eval()
+    ids=torch.tensor([[1,2,3,4]])
+    attention=torch.ones_like(ids)
+    positions=torch.tensor([[1,2,3]])
+    tokens=ids[:,1:]
+    valid=torch.ones_like(tokens,dtype=torch.bool)
+    with torch.no_grad():
+        logits=actor_response_logits(actor,ids,attention,positions,valid)
+        logits=sampling_logits(logits,min_response_tokens=2,stop_token_ids=(0,),inplace=True)
+        cache=build_credit_cache(logits,tokens,torch.zeros(1,3,4),torch.ones(19,4),
+            torch.ones(1),torch.ones(1),valid,tau=1.,credit_lambda=1.,
+            policy_temperature=.7,min_response_tokens=2,stop_token_ids=(0,))
+    loss=actor_policy_loss(actor,ids,attention,positions,tokens,valid,cache)
+    torch.testing.assert_close(loss,torch.tensor(-1.),atol=2e-6,rtol=2e-6)

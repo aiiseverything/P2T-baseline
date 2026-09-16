@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$R:$R/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
@@ -19,11 +19,13 @@ RECIPES="${TVT_RECIPES:-1.0:1:1.0:-1}"
 
 # two engine startups (one per dataset)
 python3 scripts/eval_alpaca.py \
+  --model "${TVT_MODEL:-models/Qwen3-14B-Base}" \
   --output "$OUT" --max-tokens 2048 --recipes "$RECIPES" \
   --dataset "$TRAIN_DATA" \
   --adapters "clean2k5-train=$ADAPTER"
 
 python3 scripts/eval_alpaca.py \
+  --model "${TVT_MODEL:-models/Qwen3-14B-Base}" \
   --output "$OUT" --max-tokens 2048 --recipes "$RECIPES" \
   --dataset "$TEST_DATA" \
   --adapters "clean2k5-test=$ADAPTER"

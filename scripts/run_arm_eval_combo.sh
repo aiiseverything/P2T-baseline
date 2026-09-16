@@ -9,8 +9,8 @@
 #
 # Required env: EVAL_RUNS, EVAL_OUT, IFEVAL_ADAPTERS, IFEVAL_OUT
 # Optional env: EVAL_TEMPS (default "1.0 0.7"), IFEVAL_RECIPES (default "1.0:1:1.0:-1")
-set -uo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+set -euo pipefail
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$R:$R/.vllm-extra:$R/third_party/ifeval"
 export NLTK_DATA="$R/third_party/ifeval/nltk_data"

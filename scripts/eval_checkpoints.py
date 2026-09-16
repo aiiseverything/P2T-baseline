@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import random
 import statistics
 import sys
@@ -32,6 +33,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
+from scripts.eval_artifacts import (atomic_text, fingerprint, file_hash, cache_matches,
+                                    commit_cache, runtime_versions,
+                                    validate_adapter_base, validate_outputs)
 
 
 def load_validation_prompts(dataset_path: str, num_prompts: int) -> list[str]:
@@ -68,6 +72,12 @@ def _banned_ids(model_path: str) -> dict[int, float]:
     return {i: -100.0 for i in range(vocab_size) if i not in known}
 
 
+def _stop_ids(model_path):
+    from transformers import AutoTokenizer
+    from vpo_rm.token_policy import get_stop_token_ids
+    return list(get_stop_token_ids(AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)))
+
+
 def _presence_penalty() -> float:
     """Matched-conditions eval: PP-trained arms are evaluated with their
     training-time presence penalty (EVAL_PP env); PP-free arms default to 0."""
@@ -81,28 +91,45 @@ def _top_p() -> float:
     return float(os.environ.get("EVAL_TOPP", "0.9"))
 
 
+def validate_temperature(temperature: float) -> float:
+    """Reject values vLLM would clamp or reject instead of changing protocol."""
+    if (not math.isfinite(temperature)
+            or (temperature != 0 and not 0.01 <= temperature <= 2.0)):
+        raise ValueError("temperature must be 0 or in [0.01, 2.0]")
+    return temperature
+
+
 def generate_all(runs, rendered, temps, args):
     """In-process vLLM: one pass over (run, step, temp); returns token-id lists."""
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True,
+    from vpo_rm.integration import checked_sampling_params, vllm_support_kwargs
+    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
               enable_lora=True, max_lora_rank=64, max_loras=1,
               max_model_len=4096, max_num_seqs=args.max_num_seqs,
               gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed)
-    params = {t: SamplingParams(temperature=t,
+    from transformers import AutoConfig, AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
+    support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
+    params = {t: checked_sampling_params(SamplingParams, temperature=validate_temperature(t),
                                 top_p=1.0 if t == 0 else _top_p(),
                                 max_tokens=args.max_tokens, seed=args.seed,
-                                min_tokens=16, stop_token_ids=[151643, 151645],
-                                logit_bias=_banned_ids(args.model),
+                                min_tokens=getattr(args, 'min_tokens', 0), stop_token_ids=_stop_ids(args.model),
+                                **support_kwargs,
                                 presence_penalty=_presence_penalty())
               for t in temps}
     generations = {}
+    adapter_id = 0
     for label, run_dir in runs:
         for step, adapter in discover_adapters(run_dir):
-            lora = LoRARequest(f"step-{step}", step + 1, str(adapter))
+            validate_adapter_base(adapter, args.model)
+            adapter_id += 1
+            lora = LoRARequest(f"{label}-step-{step}", adapter_id, str(adapter))
             for t in temps:
                 t0 = time.monotonic()
                 outs = llm.generate(rendered, params[t], lora_request=lora)
+                validate_outputs(outs, len(rendered), 1)
                 toks = [list(o.token_ids) if hasattr(o, "token_ids")
                         else list(o.outputs[0].token_ids) for o in outs]
                 generations[(label, step, t)] = toks
@@ -121,6 +148,9 @@ def score_all(generations, prompts, temps, args):
     from vpo_rm.reward import LastTokenReward
     from vpo_rm.trainer import VPOTrainer
     rtok = AutoTokenizer.from_pretrained(args.rm, padding_side="right", trust_remote_code=True)
+    atok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    if atok.get_vocab() != rtok.get_vocab():
+        raise ValueError("Actor and reward model token-to-ID mappings differ")
     if rtok.pad_token_id is None:
         rtok.pad_token = rtok.eos_token
     rm_base = AutoModelForSequenceClassification.from_pretrained(
@@ -175,39 +205,73 @@ def main():
     p.add_argument("--num-prompts", type=int, default=256)
     p.add_argument("--temps", type=float, nargs="+", default=[0.7, 0.0])
     p.add_argument("--max-tokens", type=int, default=2048)
+    p.add_argument("--min-tokens", type=int, default=0)
     p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--rm-microbatch", type=int, default=8)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--output", required=True)
     args = p.parse_args()
+    try:
+        args.temps = [validate_temperature(t) for t in args.temps]
+    except ValueError as error:
+        p.error(str(error))
     if torch.cuda.device_count() < 2:
         raise RuntimeError("eval needs two GPUs: cuda:0 generation, cuda:1 RM")
     runs = []
     for spec in args.run:
         label, path = spec.split("=", 1)
+        if not label or any(old == label for old, _ in runs):
+            p.error("run labels must be nonempty and unique")
         runs.append((label, Path(path)))
 
     from vpo_rm.trainer import VPOTrainer
-    from transformers import AutoTokenizer
+    from transformers import AutoConfig, AutoTokenizer
+    from vpo_rm.integration import sampling_summary, vllm_support_kwargs
     atok = AutoTokenizer.from_pretrained(args.model, padding_side="left", trust_remote_code=True)
+    actor_vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
+    support_summary = sampling_summary(vllm_support_kwargs(atok, actor_vocab_size))
     prompts = load_validation_prompts(args.dataset_path, args.num_prompts)
     rendered = [VPOTrainer._render_chat_prompt(atok, p) for p in prompts]
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "eval_prompts.json").write_text(json.dumps(prompts))
+    checkpoints = [(label, step, adapter) for label, run_dir in runs for step, adapter in discover_adapters(run_dir)]
+    if not checkpoints:
+        raise ValueError('No adapter checkpoints discovered')
+    for _, _, adapter in checkpoints:
+        validate_adapter_base(adapter, args.model)
+    config = {'args': vars(args), 'top_p': _top_p(), 'presence_penalty': _presence_penalty(),
+              'model': fingerprint(args.model, full_weights=False),
+              'rm': fingerprint(args.rm, full_weights=False), 'dataset': fingerprint(args.dataset_path),
+              'adapters': {f'{label}/{step}': fingerprint(adapter) for label, step, adapter in checkpoints},
+              'prompts': prompts, 'source_sha256': file_hash(__file__),
+              'eval_artifacts_sha256': file_hash(ROOT / 'scripts/eval_artifacts.py'),
+              'trainer_sha256': file_hash(ROOT / 'vpo_rm/trainer.py'),
+              'token_policy_sha256': file_hash(ROOT / 'vpo_rm/token_policy.py'),
+              'integration_sha256': file_hash(ROOT / 'vpo_rm/integration.py'),
+              'alignment_sha256': file_hash(ROOT / 'vpo_rm/alignment.py'),
+              'runtime_versions': runtime_versions()}
+    config['output_support'] = support_summary
+    files = [out / name for name in ('eval_prompts.json', 'eval.jsonl', 'summary.json', 'generations.jsonl')]
+    manifest = out / 'manifest.json'
+    if cache_matches(manifest, config, files):
+        print('Verified cached RM evaluation; skipping', flush=True)
+        return
+    atomic_text(out / 'eval_prompts.json', json.dumps(prompts))
     print(f"eval set: {len(prompts)} frozen validation prompts, temps={args.temps}", flush=True)
 
     generations = generate_all(runs, rendered, args.temps, args)
     scores = score_all(generations, prompts, args.temps, args)
 
-    with (out / "eval.jsonl").open("w") as f:
-        for (label, step, t), vals in sorted(scores.items()):
-            toks = generations[(label, step, t)]
-            for i, (score, resp) in enumerate(zip(vals, toks)):
-                f.write(json.dumps({"run": label, "step": step, "temp": t,
-                                    "prompt": i, "score": score,
-                                    "response_tokens": len(resp)}) + "\n")
+    eval_rows, generation_rows = [], []
+    for (label, step, t), vals in sorted(scores.items()):
+        toks = generations[(label, step, t)]
+        for i, (score, resp) in enumerate(zip(vals, toks)):
+            identity = {'run': label, 'step': step, 'temp': t, 'prompt': i}
+            eval_rows.append({**identity, 'score': score, 'response_tokens': len(resp)})
+            generation_rows.append({**identity, 'token_ids': resp})
+    atomic_text(out / 'eval.jsonl', '\n'.join(json.dumps(row) for row in eval_rows))
+    atomic_text(out / 'generations.jsonl', '\n'.join(json.dumps(row) for row in generation_rows))
     summary = {}
     for (label, step, t), vals in sorted(scores.items()):
         toks = generations[(label, step, t)]
@@ -216,7 +280,8 @@ def main():
             "mean": statistics.mean(vals), "ci95": [lo, hi],
             "mean_response_tokens": statistics.mean(map(len, toks)),
             "n": len(vals)}
-    (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
+    atomic_text(out / "summary.json", json.dumps(summary, indent=2, sort_keys=True))
+    commit_cache(manifest, config, files)
     print(f"wrote {out}/eval.jsonl and summary.json", flush=True)
 
 

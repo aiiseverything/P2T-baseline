@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$R:$R/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
@@ -19,6 +19,7 @@ ADAPTERS="${GSM8K_ADAPTERS:?GSM8K_ADAPTERS=tag=path,... required}"
 RECIPES="${GSM8K_RECIPES:-1.0:1:1.0:-1}"
 
 exec python3 scripts/eval_gsm8k.py \
+  --model "${GSM8K_MODEL:-${EVAL_MODEL:-models/Qwen3-14B-Base}}" \
   --output "${GSM8K_OUT:?required}" \
   --max-tokens "${GSM8K_MAX_TOKENS:-1024}" \
   --recipes $RECIPES \

@@ -28,6 +28,20 @@ if EXTRA.exists():
 
 import torch
 from vpo_rm.trainer import TrainerConfig, VPOTrainer, load_prompt_dataset
+from vpo_rm.length_reward_cli import add_length_reward_args, length_reward_config_kwargs
+
+
+def write_profile_calibration_manifest(manifest_path: Path, calibration_path: Path,
+                                       trainer_config: TrainerConfig) -> None:
+    """Record the trainer's post-calibration config and exact calibration file."""
+    manifest = json.loads(manifest_path.read_text())
+    calibration_bytes = calibration_path.read_bytes()
+    manifest["config"] = asdict(trainer_config)
+    manifest["length_reward_calibration"] = {
+        "data": json.loads(calibration_bytes),
+        "sha256": hashlib.sha256(calibration_bytes).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2))
 
 
 def main():
@@ -55,12 +69,12 @@ def main():
     p.add_argument("--beta", type=float, default=0.01, help="KL coefficient")
     p.add_argument("--init-adapter", default="",
                    help="Shared SFT initialization for both arms (stage 0 output)")
-    p.add_argument("--kl-reference", choices=["rollout", "init"], default="rollout",
+    p.add_argument("--kl-reference", choices=["rollout", "init"], default="init",
                    help="KL anchored to the SFT init ('init') or per-step rollout policy")
-    p.add_argument("--length-penalty-slope", type=float, default=0.0,
-                   help="Reward debias per token below the anchor (p9g calibrated: 5.06e-3)")
-    p.add_argument("--length-penalty-anchor", type=int, default=600)
-    p.add_argument("--min-response-tokens", type=int, default=8)
+    add_length_reward_args(p)
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--policy-epochs", type=int, default=1)
+    p.add_argument("--optimizer-minibatch-responses", type=int, default=64)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--generation-seed", type=int, default=0,
                    help="Matches the earlier profile's vLLM default seed")
@@ -76,7 +90,8 @@ def main():
     if (out / "metrics.jsonl").exists():
         raise FileExistsError(f"Use a fresh output directory: {out}")
     started = time.monotonic()
-    prompts, _, split = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized", dataset_path=args.dataset_path)
+    prompts, _, split = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized", dataset_path=args.dataset_path,
+                                          exclude_benchmarks=True)
     cfg = TrainerConfig(
         model_name=args.model, reward_model_name=args.rm, output_dir=str(out),
         method=args.method, rollout_iterations=args.max_rollouts,
@@ -89,10 +104,10 @@ def main():
         freeze_stop_tokens=args.freeze_stop_tokens,
         freeze_structural=args.freeze_structural,
         init_adapter=args.init_adapter, kl_reference=args.kl_reference,
-        length_penalty_slope=args.length_penalty_slope,
-        length_penalty_anchor=args.length_penalty_anchor,
-        min_response_tokens=args.min_response_tokens,
-        actor_device="cuda:0", reward_device="cuda:1",
+        temperature=args.temperature, policy_epochs_per_rollout=args.policy_epochs,
+        optimizer_minibatch_responses=args.optimizer_minibatch_responses,
+        actor_device="cuda:0", reward_device="cuda:1", allocated_gpu_count=3,
+        **length_reward_config_kwargs(args),
     ).resolved()
     # Seed before PEFT initializes LoRA A matrices, not only in trainer.__init__.
     torch.manual_seed(args.seed)
@@ -101,14 +116,22 @@ def main():
     prompts = trainer.filter_prompts(prompts)
     if len(prompts) < cfg.prompts_per_rollout * args.max_rollouts:
         raise RuntimeError("not enough prompts after filtering")
+    split = dict(split, filtered_train_prompts=len(prompts),
+                 dropped_train_prompts=trainer.filtered_prompt_count)
     trainer.data_split = split
     (out / "data_split.json").write_text(json.dumps(split, indent=2, sort_keys=True))
-    (out / "profile_manifest.json").write_text(json.dumps({
+    manifest_path = out / "profile_manifest.json"
+    manifest_path.write_text(json.dumps({
         "config": asdict(cfg), "generation_seed": args.generation_seed,
+        "sampling": trainer.sampling_manifest(), "resume_supported": False,
+        "gpu_hours_definition": "elapsed_since_trainer_initialization_times_allocated_gpu_count",
         "gpu_count": 3, "gpu_names": [torch.cuda.get_device_name(i) for i in range(3)],
         "vllm_device": "cuda:2", "job_id": os.environ.get("JOB_ID"),
         "source_sha256": {f: hashlib.sha256((ROOT / f).read_bytes()).hexdigest()
-                          for f in ["vpo_rm/trainer.py", "vpo_rm/integration.py",
+                          for f in ["vpo_rm/trainer.py", "vpo_rm/integration.py", "vpo_rm/core.py",
+                                    "vpo_rm/token_policy.py", "vpo_rm/alignment.py", "vpo_rm/data.py",
+                                    "vpo_rm/length_reward.py", "vpo_rm/rollout_selection.py",
+                                    "vpo_rm/length_reward_cli.py",
                                     "scripts/profile_vllm_full.py", "scripts/vllm_generate_server.py"]},
     }, indent=2))
     adapter_root = out / "vllm-adapters"
@@ -153,6 +176,7 @@ def main():
             torch.cuda.synchronize(device)
 
     generation_stats = {}
+    generation_requests = []
 
     @torch.no_grad()
     def rollout_vllm(batch_prompts):
@@ -162,10 +186,13 @@ def main():
         prompt_width = batch["input_ids"].shape[1]
         result = request({"prompts": rendered, "adapter": str(adapter_path),
                           "adapter_id": adapter_id, "max_tokens": cfg.max_response_tokens,
-                          "group_size": cfg.group_size})
+                          "group_size": cfg.group_size, "temperature": cfg.temperature,
+                          "min_tokens": cfg.min_response_tokens, "top_p": cfg.top_p,
+                          "top_k": cfg.top_k, "presence_penalty": 0.0})
         rows = result.pop("rows")
+        finish_reasons = result["finish_reasons"]
         expected = len(batch_prompts) * cfg.group_size
-        if len(rows) != expected or any(not row for row in rows):
+        if len(rows) != expected or len(finish_reasons) != expected or any(not row for row in rows):
             raise RuntimeError("vLLM returned missing or empty responses")
         lengths = [len(row) for row in rows]
         if max(lengths) > cfg.max_response_tokens:
@@ -182,13 +209,14 @@ def main():
         input_ids = torch.cat([expanded_input, responses], dim=1)
         full_mask = torch.cat([prompt_mask, rmask.to(prompt_mask.dtype)], dim=1)
         positions = torch.arange(prompt_width, input_ids.shape[1], device=trainer.actor_device).expand(expected, -1)
-        generation_stats = {**result, "response_lengths": lengths,
+        generation_stats = {**result, "scope": "last_generation_request",
+                            "response_lengths": lengths,
                             "mean_response_tokens": sum(lengths) / expected,
                             "padded_response_width": width, "prompt_width": prompt_width,
-                            "truncation_rate": sum(n == cfg.max_response_tokens for n in lengths) / expected}
-        (out / f"rollout-{trainer.rollout_index + 1}-tokens.json").write_text(json.dumps(rows))
+                            "truncation_rate": sum(reason == "length" for reason in finish_reasons) / expected}
+        generation_requests.append(dict(generation_stats))
         sync_training_devices()
-        return input_ids, full_mask, positions, responses, rmask, [x for x in rendered for _ in range(cfg.group_size)]
+        return input_ids, full_mask, positions, responses, rmask, [x for x in rendered for _ in range(cfg.group_size)], finish_reasons
 
     records = []
     try:
@@ -201,9 +229,13 @@ def main():
         startup_sec = time.monotonic() - server_started
         print(f"vllm_startup_sec={startup_sec:.2f} server_pid={server.pid}", flush=True)
         trainer.rollout = rollout_vllm
+        if cfg.length_reward_mode == "soft":
+            trainer.prepare_length_reward(prompts)
+            write_profile_calibration_manifest(
+                manifest_path, out / "length_reward_calibration.json", trainer.cfg)
         for step in range(args.max_rollouts):
+            generation_requests.clear()
             chosen = prompts[step * 8:(step + 1) * 8]
-            (out / f"rollout-{step + 1}-prompts.json").write_text(json.dumps(chosen))
             sync_training_devices()
             for dev in [0, 1]:
                 torch.cuda.reset_peak_memory_stats(dev)
@@ -220,6 +252,7 @@ def main():
                       "profile_training_sec": training_sec, "adapter_save_sec": save_sec,
                       "profile_rollout_with_save_sec": time.monotonic() - t0,
                       "generation": generation_stats,
+                      "generation_requests": list(generation_requests),
                       "peak_allocated_gib": [torch.cuda.max_memory_allocated(i) / 2**30 for i in [0, 1]],
                       "allocated_gpu_hours_since_setup": (time.monotonic() - started) * 3 / 3600}
             records.append(record)

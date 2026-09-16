@@ -2,8 +2,8 @@
 """Plot offline RM eval curves (step vs fixed-prompt-set score) from eval.jsonl.
 
 Reads the output of scripts/eval_checkpoints.py and renders one panel per
-generation temperature: x = checkpoint step, y = mean RM score on the frozen
-256-prompt validation set, band = bootstrap 95% CI.  One line per run.
+generation temperature: x = checkpoint step, y = mean RM score on the fixed
+validation set, band = normal-approximation 95% CI. One line per run.
 """
 import argparse
 import json
@@ -28,7 +28,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--eval-jsonl", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--title", default="Offline RM eval — frozen 256 validation prompts")
+    p.add_argument("--title", default="Offline RM eval — fixed validation prompts")
     args = p.parse_args()
 
     # rows[run][temp][step] -> list of scores; lens likewise
@@ -41,6 +41,8 @@ def main():
             lens[r["run"]][r["temp"]][r["step"]].append(r["response_tokens"])
     temps = sorted({t for run in rows.values() for t in run})
     runs = sorted(rows)
+    if not temps:
+        p.error("The evaluation file contains no scored samples")
 
     fig, axes = plt.subplots(1, len(temps), figsize=(6.2 * len(temps), 4.8),
                              dpi=160, squeeze=False, sharey=True)
@@ -50,10 +52,13 @@ def main():
         ax.set_facecolor(SURFACE)
         for i, run in enumerate(runs):
             steps = sorted(rows[run][t])
+            if not steps:
+                continue
             means = [statistics.mean(rows[run][t][s]) for s in steps]
             # 95% CI of the MEAN (normal approx matches the bootstrap CI in
             # summary.json closely at n=256), not the score distribution.
             ses = [1.96 * (statistics.stdev(rows[run][t][s]) / len(rows[run][t][s]) ** 0.5)
+                   if len(rows[run][t][s]) > 1 else 0.
                    for s in steps]
             xs = steps
             los = [m - e for m, e in zip(means, ses)]
@@ -66,11 +71,11 @@ def main():
             ax.annotate(f"{run} (end {means[-1]:.2f}, {mean_len:.0f} tok)",
                         xy=(xs[-1], means[-1]), xytext=(6, 0), textcoords="offset points",
                         va="center", color=INK_2, fontsize=8.5, zorder=4)
-        ax.set_title(f"temp {t}" + (" (primary)" if t == temps[0] else " (greedy column)"),
+        ax.set_title(f"temp {t}" + (" (greedy)" if t == 0 else " (sampling)"),
                      color=INK_2, fontsize=10, loc="left")
         ax.set_xlabel("checkpoint step", color=MUTED, fontsize=10)
         if col == 0:
-            ax.set_ylabel("mean RM score (256 prompts)", color=MUTED, fontsize=10)
+            ax.set_ylabel("mean RM score", color=MUTED, fontsize=10)
         ax.tick_params(colors=MUTED, labelsize=9)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)

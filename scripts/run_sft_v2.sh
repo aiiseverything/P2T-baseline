@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-R=/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$R"
 export PYTHONPATH="$PWD:$PWD/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
@@ -24,25 +24,28 @@ SFT_EPOCHS="${SFT_EPOCHS:-2}"
 SFT_MONITOR_EVERY="${SFT_MONITOR_EVERY:-100}"
 SFT_LR="${SFT_LR:-1e-4}"
 SFT_EOS_WEIGHT="${SFT_EOS_WEIGHT:-1.0}"
+SFT_RESPONSE_EOS="${SFT_RESPONSE_EOS:-native}"
 SFT_TVT="${SFT_TVT:-0}"   # 1 = roll 25 train + 25 test after training (same job)
 
 case "$mode" in
   smoke)
     exec python3 scripts/sft_init.py \
       --model "$SFT_MODEL" --dataset-path "$SFT_DATA" \
+      --response-eos "$SFT_RESPONSE_EOS" \
       --limit 300 --micro-batch 2 --grad-accum 4 \
       --monitor-every 5 \
       --output "$SFT_OUTPUT" ;;
   full)
     python3 scripts/sft_init.py \
       --model "$SFT_MODEL" --dataset-path "$SFT_DATA" \
+      --response-eos "$SFT_RESPONSE_EOS" \
       --max-examples "$SFT_MAX_EXAMPLES" --epochs "$SFT_EPOCHS" \
       --learning-rate "$SFT_LR" --eos-weight "$SFT_EOS_WEIGHT" \
       --monitor-every "$SFT_MONITOR_EVERY" \
       --output "$SFT_OUTPUT"
     if [ "$SFT_TVT" = "1" ]; then
       # post-training rollout through the identical tvt protocol
-      TVT_ADAPTER="$SFT_OUTPUT" TVT_OUT="runs/tvt-$(basename "$SFT_OUTPUT")" \
+      TVT_MODEL="$SFT_MODEL" TVT_ADAPTER="$SFT_OUTPUT" TVT_OUT="runs/tvt-$(basename "$SFT_OUTPUT")" \
         TVT_TRAIN="$R/datasets/sft_v2/train25.jsonl" \
         TVT_TEST="$R/datasets/sft_v2/test25.jsonl" \
         bash "$R/scripts/run_train_vs_test.sh"

@@ -43,12 +43,23 @@ def assistant_text(chosen) -> str:
 # covers: Confidence: 95% / Confidence: 0.95 / Confidence level: 80% /
 # [Confidence: 90%] / *Confidence: 90%* — number required so prose like
 # "confidence and self-esteem" is never touched
-_NUM = r"\d{0,3}(?:\.\d+)?\s*%?"
+_NUM_CORE = r"(?:\d{1,3}(?:\.\d+)?|\.\d+)"
+# Keep the percent branch separate so regex backtracking cannot match only the
+# digits in ``95%.``. Word boundaries also protect prose such as ``90th``.
+_NUM = rf"{_NUM_CORE}(?:[ \t]*%(?![\w%])|(?![\w%]|\.\d))"
+# Markdown may wrap the whole annotation (``**Confidence: 90%**``) or
+# close the label before the value (``**Confidence:** 90%``).
+_CONF_ANNOTATION = (
+    rf"\[?\*{{0,2}}[Cc]onfidence(?:\s+[Ll]evel)?\s*[:：]\s*"
+    rf"\*{{0,2}}\s*{_NUM}\*{{0,2}}\]?"
+)
 CONF_TAIL = re.compile(
-    rf"(?:\s*\n)*\s*\**\[?[Cc]onfidence(?:\s+[Ll]evel)?\s*[:：]\s*{_NUM}\]?\**\s*\.?\s*$")
-# standalone variants anywhere (FLAN multi-part answers put them mid-text)
+    rf"(?:^|[ \t]*\n(?:[ \t]*\n)*)[ \t]*"
+    rf"{_CONF_ANNOTATION}[ \t]*\.?[ \t]*$")
+# Standalone variants in multi-part answers. Requiring the complete line keeps
+# ordinary prose like "reports Confidence: 95% for ..." intact.
 CONF_LINE = re.compile(
-    rf"[ \t]*\**\[?[Cc]onfidence(?:\s+[Ll]evel)?\s*[:：]\s*{_NUM}\]?\**[ \t]*\n?")
+    rf"^[ \t]*{_CONF_ANNOTATION}[ \t]*\.?[ \t]*(?:\n|$)", re.MULTILINE)
 
 def strip_confidence(text: str) -> str:
     prev = None

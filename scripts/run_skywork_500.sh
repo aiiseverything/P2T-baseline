@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM
+R="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "$(dirname "${BASH_SOURCE[0]}")/model_defaults.sh"
+cd "$R"
 export PYTHONPATH="$PWD:$PWD/.vllm-extra${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 # Both OOM failures showed multiple GiB reserved-but-unallocated; large vocab
@@ -19,7 +21,7 @@ fi
 MAX_ROLLOUTS="${MAX_ROLLOUTS:-500}"
 MODEL="${MODEL:-models/Qwen3-14B-Base}"
 RM="${RM:-models/Skywork-Reward-V2-Qwen3-8B}"
-INIT_ADAPTER="${INIT_ADAPTER:-models/sft-init-qwen3-14b-base}"
+INIT_ADAPTER="${INIT_ADAPTER:-$(default_initial_adapter "$MODEL")}"
 # Per-arm overrides: p9h VPO runs at LR=3e-5 (credit concentration acts as a
 # ~10-20x effective-lr multiplier on hot tokens; see vpo坍缩分析-p9g.md).
 LR="${LR:-5e-5}"
@@ -39,7 +41,7 @@ esac
 
 # Gate on the unit tests before committing GPU hours (no torch on the login
 # node, so tests can only run inside the job image).
-python3 -m pytest tests/test_core.py tests/test_integration.py tests/test_trainer.py -q
+python3 -m pytest tests/test_core.py tests/test_token_policy.py tests/test_integration.py tests/test_trainer.py -q
 
 # p9g: shared SFT init (stage 0), init-anchored KL (beta 0.03), calibrated
 # length debias (5.06e-3/token below 600, overlong floored), guard at 64,

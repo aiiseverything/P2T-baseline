@@ -26,6 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
+                                    eval_config, fingerprint, validate_outputs, validate_adapter_base)
+import math
 sys.path.insert(0, str(ROOT / "third_party" / "ifeval"))
 
 
@@ -34,7 +37,8 @@ def parse_recipe(spec: str) -> dict:
     if len(parts) != 4:
         raise ValueError(f"recipe '{spec}' must be temp:n_samples:top_p:top_k")
     temp, n, top_p, top_k = float(parts[0]), int(parts[1]), float(parts[2]), int(parts[3])
-    if temp < 0 or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1:
+    if (not math.isfinite(temp) or (temp != 0 and not 0.01 <= temp <= 2.0)
+            or n < 1 or not (0 < top_p <= 1.0) or top_k == 0 or top_k < -1):
         raise ValueError(f"out-of-range values in recipe '{spec}'")
     if temp == 0.0 and n > 1:
         raise ValueError(f"greedy (temp 0) cannot draw {n} distinct samples: '{spec}'")
@@ -47,7 +51,7 @@ def parse_adapters(specs):
         if "=" not in spec:
             raise ValueError(f"adapter spec '{spec}' must be TAG=PATH (or TAG=none)")
         tag, path = spec.split("=", 1)
-        if not tag or not path:
+        if not tag or not path or Path(tag).name != tag or tag in ('.', '..') or any(t == tag for t, _ in out):
             raise ValueError(f"empty tag or path in '{spec}'")
         out.append((tag, path))
     if not out:
@@ -208,45 +212,57 @@ def main():
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from transformers import AutoTokenizer, AutoConfig
+    from vpo_rm.integration import (checked_sampling_params, sampling_summary,
+                                    vllm_support_kwargs)
     from vpo_rm.trainer import VPOTrainer
+    from vpo_rm.token_policy import get_stop_token_ids
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    stop_ids = get_stop_token_ids(tokenizer)
+    model_fingerprint = fingerprint(args.model, full_weights=False)
     rendered = [VPOTrainer._render_chat_prompt(tokenizer, row["prompt"]) for row in data]
 
-    known = set(tokenizer.get_vocab().values())
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
-    banned = {i: -100.0 for i in range(vocab_size) if i not in known}
+    support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
+    support_summary = sampling_summary(support_kwargs)
 
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True,
-              enable_lora=True, max_lora_rank=64, max_loras=4,
-              max_model_len=4096, max_num_seqs=64,
-              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+    llm = None
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i, (tag, path) in enumerate(adapters):
+        validate_adapter_base(path, args.model)
         lora = None if path == "none" else LoRARequest(f"lora-{tag}", i + 1, str(Path(path)))
         tag_dir = out_dir / tag
         tag_dir.mkdir(parents=True, exist_ok=True)
 
+        adapter_fingerprint = None if path == 'none' else fingerprint(path)
         for recipe in recipes:
             rectag = f"t{recipe['temp']}_n{recipe['n']}"
             result_path = tag_dir / f"results_{rectag}.json"
-            if result_path.exists():
-                print(f"[{tag}/{rectag}] results exist, skipping", flush=True)
+            gen_path = tag_dir / f'generations_{rectag}.jsonl'
+            manifest = tag_dir / f'manifest_{rectag}.json'
+            config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint,
+                                 stop_ids, 'ifeval', support_summary)
+            if cache_matches(manifest, config, [result_path, gen_path]):
+                print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
-            params = SamplingParams(
+            if llm is None:
+                llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
+              enable_lora=True, max_lora_rank=64, max_loras=4,
+              max_model_len=4096, max_num_seqs=64,
+              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+            params = checked_sampling_params(SamplingParams,
                 temperature=recipe["temp"], top_p=recipe["top_p"],
                 top_k=recipe["top_k"],
                 n=recipe["n"], max_tokens=args.max_tokens, seed=args.seed,
-                stop_token_ids=[151643, 151645], logit_bias=banned)
+                stop_token_ids=list(stop_ids), **support_kwargs)
             outputs = llm.generate(rendered, params, lora_request=lora)
-            n_actual = len(outputs[0].outputs)
-            if n_actual != recipe["n"]:
-                raise RuntimeError(f"vLLM returned {n_actual} samples, expected {recipe['n']}")
+            validate_outputs(outputs, len(data), recipe['n'])
+            n_actual = recipe['n']
             # sample-major: responses[s][i] = sample s for prompt i
             responses_by_sample = [[o.outputs[s].text for o in outputs] for s in range(n_actual)]
-            tokens_by_prompt = [sorted(len(o.outputs[s].token_ids) for s in range(n_actual)) for o in outputs]
+            tokens_by_prompt = [[len(o.outputs[s].token_ids) for s in range(n_actual)] for o in outputs]
             print(f"[{tag}/{rectag}] generated {len(outputs)} prompts x {n_actual} samples "
                   f"(top_p={recipe['top_p']}, top_k={recipe['top_k']})", flush=True)
 
@@ -263,7 +279,8 @@ def main():
             mean_metrics = mean_over_samples(per_sample) if n_actual > 1 else per_sample[0]
 
             mean_len = sum(sum(l) / len(l) for l in tokens_by_prompt) / len(tokens_by_prompt)
-            p95_len = sorted(l[-1] for l in tokens_by_prompt)[int(0.95 * len(tokens_by_prompt))]
+            all_lengths = sorted(t for lengths in tokens_by_prompt for t in lengths)
+            p95_len = all_lengths[min(len(all_lengths) - 1, int(0.95 * len(all_lengths)))]
             print(f"\n{'=' * 55}")
             print(f"  IFEval [{tag} / {rectag}] — adapter: {path}")
             print(f"{'=' * 55}")
@@ -278,7 +295,7 @@ def main():
             for key in sorted(mean_metrics["per_constraint"]):
                 print(f"    {key:<30s} {mean_metrics['per_constraint'][key]['strict']:.3f}")
 
-            result_path.write_text(json.dumps({
+            atomic_text(result_path, json.dumps({
                 "adapter": str(path), "tag": tag,
                 "recipe": recipe, "seed": args.seed, "max_tokens": args.max_tokens,
                 **mean_metrics,
@@ -286,11 +303,12 @@ def main():
                 "response_length_mean": mean_len, "response_length_p95": p95_len,
                 "details": details,
             }, indent=1, ensure_ascii=False))
-            (tag_dir / f"generations_{rectag}.jsonl").write_text("\n".join(json.dumps({
+            atomic_text(gen_path, "\n".join(json.dumps({
                 "key": inp.key, "prompt": inp.prompt,
                 "responses": [responses_by_sample[s][i] for s in range(n_actual)],
                 "response_tokens": tokens_by_prompt[i],
             }) for i, inp in enumerate(inp_list)))
+            commit_cache(manifest, config, [result_path, gen_path])
             print(f"  Saved to {result_path}", flush=True)
 
     print("\nDone.")

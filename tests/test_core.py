@@ -210,3 +210,89 @@ def test_masked_vocabulary_matches_supported_softmax():
     with pytest.raises(ValueError, match='output support'):
         compute_credit(z, torch.tensor([[0,4]]), f, W, torch.ones(1),
                         torch.ones(1), mask, 1.)
+
+
+@pytest.mark.parametrize('outlier,tau', [(1., 1.), (-1., .3), (-1., .001)])
+def test_lambda_band_handles_long_responses_and_small_temperature(outlier, tau):
+    a, _ = group_advantages(torch.tensor([1.] + [0.] * 7), torch.zeros(8, dtype=torch.long))
+    d = torch.zeros(1, 2048)
+    d[0, 0] = outlier
+    c = allocate(d, a[:1], torch.ones_like(d, dtype=torch.bool), tau, credit_lambda=2.)
+    assert c.weight.max() <= 2. + 1e-6
+    assert c.weight.min() >= .5 - 1e-6
+    torch.testing.assert_close(c.weight.sum(-1), torch.tensor([2048.]))
+
+
+def test_lambda_band_still_holds_after_freezing_terminal_token():
+    d = torch.tensor([[4., 0., 0., 0., 5.]])
+    ids = torch.tensor([[5, 5, 5, 5, 151643]])
+    c = allocate(d, torch.ones(1), torch.ones_like(ids, dtype=torch.bool), 1.,
+                 credit_lambda=2., token_ids=ids, freeze_stop_tokens=True)
+    assert c.weight.max() <= 2. + 1e-6
+    assert c.weight.min() >= .5 - 1e-6
+    assert c.weight[0, -1] == 1.
+    torch.testing.assert_close(c.weight.sum(-1), torch.tensor([5.]))
+
+
+def test_lambda_one_zeros_padding_credit():
+    c = allocate(torch.tensor([[1., float('nan')]]), torch.tensor([2.]),
+                 torch.tensor([[True, False]]), 1., credit_lambda=1.)
+    torch.testing.assert_close(c.weight, torch.tensor([[1., 0.]]))
+    torch.testing.assert_close(c.advantage, torch.tensor([[2., 0.]]))
+
+
+def test_positive_clipped_ratio_does_not_overflow_in_backward():
+    new = torch.tensor([[-1.]], requires_grad=True)
+    loss = grpo_policy_loss(new, torch.tensor([[-101.]]), torch.ones(1, 1),
+                            torch.ones(1, 1, dtype=torch.bool))
+    loss.backward()
+    assert loss.item() == pytest.approx(-1.2)
+    assert new.grad.item() == 0.
+
+
+def test_unrepresentable_negative_advantage_loss_fails_before_backward():
+    with pytest.raises(ValueError, match='finite|overflow'):
+        grpo_policy_loss(torch.tensor([[-1.]], requires_grad=True),
+                         torch.tensor([[-101.]]), -torch.ones(1, 1),
+                         torch.ones(1, 1, dtype=torch.bool))
+
+
+def test_structural_freezing_requires_verified_ids():
+    with pytest.raises(ValueError, match='structural_token_ids'):
+        allocate(torch.ones(1, 2), torch.ones(1), torch.ones(1, 2, dtype=torch.bool),
+                 1., token_ids=torch.tensor([[5687, 198]]), freeze_structural=True)
+
+
+def test_tokenizer_derived_freezing_preserves_content_and_all_frozen_rows():
+    d = torch.tensor([[2., -1., 10., 5.], [1., 2., 3., 0.]])
+    ids = torch.tensor([[5687, 8, 7, 9], [7, 9, 7, 0]])
+    mask = torch.tensor([[True, True, True, True], [True, True, True, False]])
+    c = allocate(d, torch.ones(2), mask, 1., token_ids=ids, freeze_structural=True,
+                 stop_token_ids=(9,), structural_token_ids=(7,))
+    assert c.weight[0, 0] > 1. and c.weight[0, 1] < 1.
+    torch.testing.assert_close(c.weight[0, 2:], torch.ones(2))
+    torch.testing.assert_close(c.weight[1], torch.tensor([1., 1., 1., 0.]))
+    torch.testing.assert_close(c.weight.sum(-1), mask.sum(-1).float())
+
+
+def test_sub_float32_lambda_band_has_a_finite_uniform_solution():
+    d = torch.arange(41).float()[None, :]
+    c = allocate(d, torch.ones(1), torch.ones_like(d, dtype=torch.bool), 1.,
+                 credit_lambda=1.000000001)
+    torch.testing.assert_close(c.weight, torch.ones_like(d), atol=0., rtol=0.)
+    assert torch.isfinite(c.tau_used).all()
+
+
+def test_credit_scales_bfloat16_policy_logits_in_float32_chunks():
+    torch.manual_seed(17)
+    z = (torch.randn(2, 4, 9) * 3.).bfloat16()
+    tokens = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
+    mask = torch.ones_like(tokens, dtype=torch.bool)
+    f, embedding = torch.randn(2, 4, 3), torch.randn(9, 3)
+    a, scale = torch.tensor([1., -1.]), torch.tensor([.8, 1.2])
+    expected = compute_credit(z.float() / .7, tokens, f, embedding, a, scale, mask, 1.,
+                              token_chunk_size=2, vocab_chunk_size=3)
+    actual = compute_credit(z, tokens, f, embedding, a, scale, mask, 1.,
+                            token_chunk_size=2, vocab_chunk_size=3, policy_temperature=.7)
+    torch.testing.assert_close(actual.direction, expected.direction)
+    torch.testing.assert_close(actual.weight, expected.weight)
