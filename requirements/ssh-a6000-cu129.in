@@ -1,0 +1,20 @@
+# Linux x86_64, Python 3.12. Core versions match the recorded H200 environment.
+# Resolve/install with the official PyTorch cu129 index as well as PyPI.
+torch==2.13.0+cu129
+torchvision==0.28.0+cu129
+torchaudio==2.11.0+cu129
+vllm @ https://wheels.vllm.ai/7c5dc571cbd1064ecc8a9b1045637ff647aa22cb/vllm-0.28.1rc1.dev199%2Bg7c5dc571c.cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+transformers==5.16.1
+peft==0.20.0
+pyarrow==21.0.0
+accelerate>=1.0
+datasets>=3.0
+pytest>=8
+matplotlib
+absl-py
+langdetect
+immutabledict
+nltk
+scikit-learn
+scipy
+httpx

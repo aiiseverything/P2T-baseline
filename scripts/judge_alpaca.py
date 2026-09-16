@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -44,8 +45,25 @@ BASE_URL = "https://api.linkapi.ai/v1"
 JUDGE_MODEL = "gpt-4.1"
 
 
-def load_template() -> str:
-    return TEMPLATE_PATH.read_text()
+def load_template(template_path: Path | str | None = None) -> str:
+    """Read an explicit template, the historical path, or installed package data."""
+    if template_path is not None:
+        # A missing explicit choice must not silently select another template.
+        return Path(template_path).read_text(encoding="utf-8")
+    if TEMPLATE_PATH.exists():
+        return TEMPLATE_PATH.read_text(encoding="utf-8")
+    try:
+        spec = importlib.util.find_spec("alpaca_eval")
+    except (ImportError, ValueError):
+        spec = None
+    relative = Path("evaluators_configs/alpaca_eval_clf_gpt4_turbo/alpaca_eval_clf.txt")
+    for root in (spec.submodule_search_locations or ()) if spec is not None else ():
+        candidate = Path(root) / relative
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        "Cannot locate the AlpacaEval judge template. Pass --template PATH, or install "
+        f"alpaca_eval containing {relative}. Historical path: {TEMPLATE_PATH}")
 
 
 def to_chat_messages(filled: str):
@@ -286,6 +304,8 @@ def main():
     ap.add_argument("--generation-file", default="generations_t1.0_n1.jsonl",
                     help="Generation filename within each tag (select an n>1 recipe here)")
     ap.add_argument("--refs", default="datasets/alpacaeval/eval_gpt4turbo_reference.jsonl")
+    ap.add_argument("--template", type=Path,
+                    help="Judge template file; otherwise use the historical or installed AlpacaEval template")
     ap.add_argument("--tags", nargs="+", default=[],
                     help="subset of tags (default: every dir with generations)")
     ap.add_argument("--limit", type=int, default=0, help="judge only first N prompts (pilot)")
@@ -293,12 +313,12 @@ def main():
     ap.add_argument("--budget-cny", type=float, default=90.0)
     ap.add_argument("--key-file", default="/root/.linkapi_key")
     ap.add_argument("--selftest-judge", action="store_true",
-                    help="judge reference-vs-reference on 30 prompts; expect WR≈50%")
+                    help="judge reference-vs-reference on 30 prompts; expect WR≈50%%")
     args = ap.parse_args()
 
     if args.limit < 0 or args.workers < 1:
         ap.error('limit must be nonnegative and workers positive')
-    template = load_template()
+    template = load_template(args.template) if args.template is not None else load_template()
     refs = [json.loads(l) for l in open(args.refs)]
     validate_references(refs)
     relay = None

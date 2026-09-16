@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Persistent single-GPU vLLM LoRA generation server.
+"""Persistent vLLM LoRA generation server on dedicated generation GPUs.
 
-The process owns one GPU for its entire lifetime and serves newline-delimited
+The process owns its GPU allocation for its entire lifetime and serves newline-delimited
 JSON requests over a Unix domain socket.  Keeping the engine alive avoids
 reloading the base model and CUDA graphs for every rollout.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 import sys
@@ -22,13 +23,26 @@ from vpo_rm.integration import (vllm_sampling_kwargs, generation_payload,
                                 checked_sampling_params, sampling_summary)
 
 
-def main() -> None:
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
     p.add_argument("--socket", required=True)
     p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
-    args = p.parse_args()
+    p.add_argument("--gpu-memory-utilization", type=float, default=.45)
+    p.add_argument("--tensor-parallel-size", type=int, default=1)
+    args = p.parse_args(argv)
+    if not math.isfinite(args.gpu_memory_utilization) or not 0 < args.gpu_memory_utilization <= 1:
+        p.error("--gpu-memory-utilization must be in (0, 1]")
+    if args.tensor_parallel_size < 1:
+        p.error("--tensor-parallel-size must be positive")
+    if args.max_num_seqs < 1:
+        p.error("--max-num-seqs must be positive")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
 
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
@@ -53,7 +67,8 @@ def main() -> None:
         seed=args.seed,
         generation_config="vllm",
         max_model_len=4096, max_num_seqs=args.max_num_seqs,
-        gpu_memory_utilization=0.45, tensor_parallel_size=1,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.tensor_parallel_size,
     )
     sock_path = Path(args.socket)
     sock_path.unlink(missing_ok=True)

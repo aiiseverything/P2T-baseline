@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "description": "Minimal local assets for Qwen3-14B native-EOS SFT-initialized Skywork RL and benchmark exclusion. Paths are relative to the VPO-RM checkout. Public source revisions reflect local download metadata where available.",
+  "assets": [
+    {
+      "name": "actor_qwen3_14b_base",
+      "kind": "model",
+      "path": "models/Qwen3-14B-Base",
+      "required": true,
+      "role": "actor base; vLLM generation; actor tokenizer and chat template",
+      "source": {
+        "type": "hf_model",
+        "repo_id": "Qwen/Qwen3-14B-Base",
+        "revision": "8aef5080913aafb2e661afbb57be97b765efc7c3",
+        "revision_note": "Pinned official Qwen revision. The local model has no Hugging Face revision metadata; one local shard matches this official commit, but the whole local weight folder has not been cryptographically proven identical. Key config/tokenizer/index hashes are checked below. Transfer the local folder for byte-identical weights."
+      },
+      "observed_directory_bytes": 29548217706,
+      "weight_verification": "all index-listed shards present and nonempty; full shard hashes not checked",
+      "required_files": ["config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"],
+      "key_file_sha256": {
+        "config.json": "eb65771c8f108f88e4d87f771e1c9d40b7e35bc8070be8c97246c9446ccdf179",
+        "tokenizer.json": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+        "tokenizer_config.json": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5",
+        "model.safetensors.index.json": "8bb45057e5de5b87096da94fab4492dfa0d7b9fc1b7fe9bc0d91cb9cd6c19bcb"
+      },
+      "expected_shards": 8
+    },
+    {
+      "name": "skywork_reward_qwen3_8b",
+      "kind": "model",
+      "path": "models/Skywork-Reward-V2-Qwen3-8B",
+      "required": true,
+      "role": "frozen sequence-classification reward model and reward tokenizer",
+      "source": {
+        "type": "hf_model",
+        "repo_id": "Skywork/Skywork-Reward-V2-Qwen3-8B",
+        "revision": "6f19fdefb933293d4898bdb59a96f7223d998659"
+      },
+      "observed_directory_bytes_excluding_cache": 15152919797,
+      "weight_verification": "all index-listed shards present and nonempty; full shard hashes not checked",
+      "required_files": ["config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "model.safetensors.index.json"],
+      "key_file_sha256": {
+        "config.json": "9b98949ef09d00c7f75be85844d62130954375628c7a3362c9ca94b44bd285ec",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "d3e08cbc53421cc90a07d40da21fbac9a912f5ffa3f08263afd04f06105b0e6f",
+        "chat_template.jinja": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+        "model.safetensors.index.json": "45cb6e42132a89ec71bc66fa629a3808446dbb243c09047c94a554fe1f2d6e94"
+      },
+      "expected_shards": 4
+    },
+    {
+      "name": "native_eos_sft_init_adapter",
+      "kind": "adapter",
+      "path": "models/sft-native-eos-clean2k5e2",
+      "required": true,
+      "role": "existing self-trained SFT LoRA initialization; transfer from the old machine, never downloaded from a public repo",
+      "source": {"type": "transfer"},
+      "observed_directory_bytes": 1039117668,
+      "base_model": "models/Qwen3-14B-Base",
+      "required_files": ["adapter_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "sft_manifest.json"],
+      "key_file_sha256": {
+        "adapter_config.json": "2064ecb9b7694b8bd93a71b55152f3d95c8939d043c908a05fb515ab4295f3d0",
+        "tokenizer.json": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506",
+        "tokenizer_config.json": "5f007d04324afa93876e2a484190e868136c69dfe0e1a29a1063eae583df9d32",
+        "chat_template.jinja": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+        "sft_manifest.json": "fcccf1d7704f674f13da7fde6516a262baa47ab19d0e0d524e25ee612dce9371"
+      },
+      "weights": {
+        "file": "adapter_model.safetensors",
+        "bytes": 1027680256,
+        "sha256": "21c0c7b9e75c640b03a3fddfc6bb1e7a478e02c6724111800d605187364761ad"
+      },
+      "identity": {
+        "response_eos": "native",
+        "response_eos_id": 151643,
+        "sample_count": 2500,
+        "epochs": 2,
+        "seed": 42,
+        "sample_data_sha256": "3159eb502d144b22072237685dd7b4f1155283e26b73421a8a060ec05d42dd53",
+        "target_token_sha256": "4e5b43b4142d35df169cb97c4781703e0ed33e2b99e3eecd6258df9d24233e63"
+      }
+    },
+    {
+      "name": "ultrafeedback_train_prefs",
+      "kind": "parquet",
+      "path": "datasets/ultrafeedback_binarized/data/train_prefs-00000-of-00001.parquet",
+      "required": true,
+      "role": "RL prompt source; preference/SFT source if retraining; benchmark exclusion happens before split",
+      "source": {
+        "type": "hf_file",
+        "repo_id": "HuggingFaceH4/ultrafeedback_binarized",
+        "repo_type": "dataset",
+        "revision": "3949bf5f8c17c394422ccfab0c31ea9c20bdeb85",
+        "filename": "data/train_prefs-00000-of-00001.parquet"
+      },
+      "bytes": 225891836,
+      "sha256": "0f951ca4502001d31f3e4c70716ae51d20e4ce4f847d12b6a6695a40d4d353a8",
+      "rows": 61135,
+      "fields": ["prompt", "prompt_id", "chosen", "rejected", "messages", "score_chosen", "score_rejected"]
+    },
+    {
+      "name": "alpacaeval_gpt4_turbo_reference",
+      "kind": "jsonl",
+      "path": "datasets/alpacaeval/eval_gpt4turbo_reference.jsonl",
+      "required": true,
+      "role": "AlpacaEval prompts and exact GPT-4 Turbo reference outputs; benchmark exclusion and judging",
+      "source": {
+        "type": "transfer",
+        "note": "No authoritative public file with this exact three-field JSONL and SHA-256 was identified; copy the local artifact to preserve the existing evaluation protocol."
+      },
+      "bytes": 1877547,
+      "sha256": "348901ca132cd78b77682a21cfcd1942b19738be5bafc0add8a6cbfec5992d1f",
+      "rows": 805,
+      "fields": ["instruction", "reference_output", "reference_generator"],
+      "reference_generator": "gpt4_1106_preview"
+    },
+    {
+      "name": "ifeval_input_data",
+      "kind": "jsonl",
+      "path": "datasets/ifeval/ifeval_input_data.jsonl",
+      "required": true,
+      "role": "IFEval prompts, instruction IDs and kwargs; benchmark exclusion and scoring",
+      "source": {
+        "type": "hf_file",
+        "repo_id": "google/IFEval",
+        "repo_type": "dataset",
+        "revision": "966cd89545d6b6acfd7638bc708b98261ca58e84",
+        "filename": "ifeval_input_data.jsonl"
+      },
+      "bytes": 207111,
+      "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2",
+      "rows": 541,
+      "fields": ["key", "prompt", "instruction_id_list", "kwargs"]
+    },
+    {
+      "name": "gsm8k_test",
+      "kind": "jsonl",
+      "path": "datasets/gsm8k/test.jsonl",
+      "required": true,
+      "role": "GSM8K benchmark exclusion and math evaluation",
+      "source": {
+        "type": "url",
+        "url": "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl",
+        "upstream": "openai/grade-school-math"
+      },
+      "bytes": 749738,
+      "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+      "rows": 1319,
+      "fields": ["question", "answer"]
+    },
+    {
+      "name": "sft_clean_optional",
+      "kind": "parquet",
+      "path": "datasets/sft_v2/sft_clean.parquet",
+      "required": false,
+      "role": "optional only for reproducing/retraining the existing SFT initializer; not required to run RL with the transferred adapter",
+      "source": {"type": "transfer"},
+      "bytes": 67556719,
+      "sha256": "ec5821bb8ccfa8ecf3a25e9efa2207ffcc2b59c52b18a45ab234b5c6b635c48c"
+    }
+  ]
+}

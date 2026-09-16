@@ -27,8 +27,8 @@ from typing import Any, Iterable, Sequence
 import torch
 
 from .alignment import check_response_tokens, check_tokenizers, shared_output_mask
-from .core import grpo_policy_loss
-from .integration import (actor_response_logits, build_credit_cache,
+from .core import Credit, grpo_policy_loss
+from .integration import (RolloutCache, actor_response_logits, build_credit_cache,
                           response_reward_gradients, selected_logp_from_logits,
                           sampling_logits)
 from .reward import LastTokenReward
@@ -86,6 +86,7 @@ class TrainerConfig:
     policy_epochs_per_rollout: int = 1
     optimizer_minibatch_responses: int = 64
     microbatch_responses: int = 1
+    credit_microbatch_responses: int = 0  # Zero preserves dense old-policy VPO credit.
     generation_microbatch_responses: int = 1
     max_prompt_tokens: int = 2048
     max_response_tokens: int = 2048
@@ -180,6 +181,8 @@ class TrainerConfig:
                 raise ValueError("length_calibration_prompts and degenerate_newline_run must be positive")
         if c.checkpoint_interval < 1 or c.microbatch_responses < 1:
             raise ValueError("checkpoint_interval and microbatch_responses must be positive")
+        if type(c.credit_microbatch_responses) is not int or c.credit_microbatch_responses < 0:
+            raise ValueError("credit_microbatch_responses must be a nonnegative integer")
         if not isinstance(c.allocated_gpu_count, int) or c.allocated_gpu_count < 0:
             raise ValueError("allocated_gpu_count must be a nonnegative integer")
         return c
@@ -525,6 +528,83 @@ class VPOTrainer:
         adapter = self.reference_adapter if self.reference_actor is None else "initial_model"
         return self._old_logp_microbatch(*args, adapter=adapter)
 
+    @torch.no_grad()
+    def _old_policy_entropy(self, logits, response_mask):
+        """Response entropy from FP32 token blocks of model-precision logits."""
+        entropy = torch.zeros(response_mask.shape, dtype=torch.float32, device=logits.device)
+        rows, times = response_mask.bool().nonzero(as_tuple=True)
+        chunk = max(1, int(self.cfg.token_chunk_size)) * 4
+        for lo in range(0, rows.numel(), chunk):
+            r, t = rows[lo:lo + chunk], times[lo:lo + chunk]
+            z = logits[r, t].float() / self.cfg.temperature
+            logz = z.logsumexp(-1, keepdim=True)
+            lp = z - logz
+            p = lp.exp()
+            entropy[r, t] = -torch.where(p > 0, p * lp, torch.zeros_like(p)).sum(-1)
+        return entropy
+
+    @torch.no_grad()
+    def _credit_cache_microbatch(self, input_ids, full_mask, positions, responses,
+                                response_mask, grads, advantages, scales):
+        """Build VPO caches without retaining a full rollout's vocabulary logits.
+
+        Rewards, advantages and scales must already describe complete prompt
+        groups. Only independent response attribution is partitioned here;
+        optimizer batches and per-response credit normalization stay unchanged.
+        The RM embedding is copied once, and response gradients move to the
+        actor device one microbatch at a time.
+        """
+        def finish_phase(start):
+            if self.actor_device.type == "cuda":
+                torch.cuda.synchronize(self.actor_device)
+            return time.monotonic() - start
+
+        start = time.monotonic()
+        rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
+        advantages, scales = advantages.to(self.actor_device), scales.to(self.actor_device)
+        credit_seconds = finish_phase(start)
+        actor_seconds = 0.
+        caches, entropies = [], []
+        micro = self.cfg.credit_microbatch_responses
+        for lo in range(0, responses.shape[0], micro):
+            sl = slice(lo, lo + micro)
+            start = time.monotonic()
+            logits = actor_response_logits(self.actor, input_ids[sl], full_mask[sl],
+                                           positions[sl], response_mask[sl],
+                                           output_mask=self.output_mask)
+            logits = self._sampling_logits(logits)
+            actor_seconds += finish_phase(start)
+            start = time.monotonic()
+            input_grads = grads[sl].to(self.actor_device)
+            caches.append(build_credit_cache(
+                logits, responses[sl], input_grads, rm_weight,
+                advantages[sl], scales[sl], response_mask[sl], self.cfg.tau,
+                credit_lambda=self.cfg.credit_lambda,
+                freeze_stop_tokens=self.cfg.freeze_stop_tokens,
+                freeze_structural=self.cfg.freeze_structural,
+                stop_token_ids=self.stop_token_ids,
+                structural_token_ids=self.structural_token_ids,
+                policy_temperature=self.cfg.temperature,
+                min_response_tokens=self.cfg.min_response_tokens,
+                token_chunk_size=self.cfg.token_chunk_size,
+                vocab_chunk_size=self.cfg.vocab_chunk_size))
+            entropies.append(self._old_policy_entropy(logits, response_mask[sl]))
+            del logits, input_grads
+            credit_seconds += finish_phase(start)
+        start = time.monotonic()
+        credit = Credit(
+            torch.cat([cache.credit.advantage for cache in caches]),
+            torch.cat([cache.credit.direction for cache in caches]),
+            torch.cat([cache.credit.weight for cache in caches]),
+            torch.cat([cache.credit.tau_used for cache in caches]))
+        cache = RolloutCache(torch.cat([cache.old_logp for cache in caches]), credit,
+                             self.cfg.temperature, self.cfg.min_response_tokens,
+                             tuple(self.stop_token_ids))
+        entropy = torch.cat(entropies)
+        credit_seconds += finish_phase(start)
+        return cache, entropy, {"actor_old_logits_sec": actor_seconds,
+                                "credit_cache_sec": credit_seconds}
+
     def _response_degeneracy(self, responses, rmask):
         from .length_reward import response_degeneracy
         stop = set(self.stop_token_ids)
@@ -682,7 +762,7 @@ class VPOTrainer:
             raise ValueError("Sampled tokens must belong to the policy output support")
         phase["generation_sec"] = elapsed_phase(tp)
         old_logits = None
-        if self.cfg.method == "vpo_rm":
+        if self.cfg.method == "vpo_rm" and self.cfg.credit_microbatch_responses == 0:
             tp = time.monotonic()
             with torch.no_grad():
                 old_logits = actor_response_logits(self.actor, input_ids, full_mask, positions, rmask,
@@ -762,39 +842,33 @@ class VPOTrainer:
         ref_logp = None
         entropy = None
         if self.cfg.method == "vpo_rm":
-            tp = time.monotonic()
-            rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
-            cache = build_credit_cache(old_logits, responses, grads.to(self.actor_device), rm_weight,
-                                       advantages.to(self.actor_device), scales.to(self.actor_device),
-                                       rmask, self.cfg.tau, credit_lambda=self.cfg.credit_lambda,
-                                       freeze_stop_tokens=self.cfg.freeze_stop_tokens,
-                                       freeze_structural=self.cfg.freeze_structural,
-                                       stop_token_ids=self.stop_token_ids,
-                                       structural_token_ids=self.structural_token_ids,
-                                       policy_temperature=self.cfg.temperature,
-                                       min_response_tokens=self.cfg.min_response_tokens,
-                                       token_chunk_size=self.cfg.token_chunk_size,
-                                       vocab_chunk_size=self.cfg.vocab_chunk_size)
-            phase["credit_cache_sec"] = elapsed_phase(tp)
+            if self.cfg.credit_microbatch_responses:
+                cache, entropy, credit_phase = self._credit_cache_microbatch(
+                    input_ids, full_mask, positions, responses, rmask, grads, advantages, scales)
+                phase.update(credit_phase)
+            else:
+                tp = time.monotonic()
+                rm_weight = self.reward.get_input_embeddings().weight.detach().to(self.actor_device)
+                cache = build_credit_cache(old_logits, responses, grads.to(self.actor_device), rm_weight,
+                                           advantages.to(self.actor_device), scales.to(self.actor_device),
+                                           rmask, self.cfg.tau, credit_lambda=self.cfg.credit_lambda,
+                                           freeze_stop_tokens=self.cfg.freeze_stop_tokens,
+                                           freeze_structural=self.cfg.freeze_structural,
+                                           stop_token_ids=self.stop_token_ids,
+                                           structural_token_ids=self.structural_token_ids,
+                                           policy_temperature=self.cfg.temperature,
+                                           min_response_tokens=self.cfg.min_response_tokens,
+                                           token_chunk_size=self.cfg.token_chunk_size,
+                                           vocab_chunk_size=self.cfg.vocab_chunk_size)
+                phase["credit_cache_sec"] = elapsed_phase(tp)
             if self.cfg.kl_reference == "init":
                 tp = time.monotonic()
                 ref_logp = self._reference_logp(input_ids, full_mask, positions, responses, rmask)
                 phase["ref_logp_sec"] = elapsed_phase(tp)
             # Rollout-policy entropy for collapse monitoring, from the already
             # materialized old logits (no extra forward).
-            with torch.no_grad():
-                entropy = torch.zeros_like(cache.credit.direction)
-                rows, times = rmask.bool().nonzero(as_tuple=True)
-                chunk = max(1, int(self.cfg.token_chunk_size)) * 4
-                for lo in range(0, rows.numel(), chunk):
-                    r, t = rows[lo:lo + chunk], times[lo:lo + chunk]
-                    z = old_logits[r, t].float() / self.cfg.temperature
-                    logz = z.logsumexp(-1, keepdim=True)
-                    lp = z - logz
-                    p = lp.exp()
-                    entropy[r, t] = -torch.where(
-                        p > 0, p * lp, torch.zeros_like(p)).sum(-1)
-                    del p, lp, logz
+            if entropy is None:
+                entropy = self._old_policy_entropy(old_logits, rmask)
         else:
             tp = time.monotonic()
             entropy = torch.zeros(responses.shape, dtype=torch.float32, device=self.actor_device)
@@ -810,7 +884,7 @@ class VPOTrainer:
             with torch.no_grad():
                 cache = type("Cache", (), {"old_logp": old_logp, "credit": Credit(token_adv, torch.zeros_like(token_adv), torch.ones_like(token_adv))})
         # old_logits is only needed while constructing old_logp/credit.  Keeping
-        # the full [B,T,V] tensor alive would consume ~33 GiB at 2048 tokens and
+        # the full [B,T,V] tensor alive would consume ~37 GiB at 2048 tokens and
         # leave no room for the per-microbatch Actor update forward.
         del old_logits
         if self.actor_device.type == "cuda":

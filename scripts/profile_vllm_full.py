@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full GRPO/VPO rollouts with Actor/RM/vLLM on three separate GPUs.
+"""Full GRPO/VPO rollouts with separate Actor/RM and vLLM GPU allocations.
 
 Reports startup separately from repeated generation, training and LoRA saving.
 The first batch matches the earlier one-rollout profile; later batches advance
@@ -11,6 +11,7 @@ import argparse
 from dataclasses import asdict
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -44,7 +45,7 @@ def write_profile_calibration_manifest(manifest_path: Path, calibration_path: Pa
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
 
-def main():
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/Qwen3-14B")
     p.add_argument("--rm", default="models/Skywork-Reward-V2-Qwen3-8B")
@@ -54,6 +55,11 @@ def main():
     p.add_argument("--max-rollouts", type=int, default=3)
     p.add_argument("--max-response-tokens", type=int, default=2048)
     p.add_argument("--generation-microbatch", type=int, default=32)
+    p.add_argument("--vllm-gpu-memory-utilization", type=float, default=.45)
+    p.add_argument("--vllm-tensor-parallel-size", type=int, default=1,
+                   help="Dedicated generation GPUs after the Actor and RM GPUs")
+    p.add_argument("--credit-microbatch-responses", type=int, default=0,
+                   help="Credit-cache response microbatch; 0 retains the full-batch path")
     p.add_argument("--keep-adapters-every", type=int, default=0,
                    help="Keep step-0, every Nth adapter, and the current adapter; 0 keeps all")
     p.add_argument("--learning-rate", type=float, default=1e-4,
@@ -78,26 +84,30 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--generation-seed", type=int, default=0,
                    help="Matches the earlier profile's vLLM default seed")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.max_rollouts < 1:
         p.error("--max-rollouts must be positive")
     if args.keep_adapters_every < 0:
         p.error("--keep-adapters-every must be nonnegative")
-    if torch.cuda.device_count() != 3:
-        raise RuntimeError("This profile requires exactly three visible GPUs")
-    out = Path(args.output_dir).resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    if (out / "metrics.jsonl").exists():
-        raise FileExistsError(f"Use a fresh output directory: {out}")
-    started = time.monotonic()
-    prompts, _, split = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized", dataset_path=args.dataset_path,
-                                          exclude_benchmarks=True)
-    cfg = TrainerConfig(
-        model_name=args.model, reward_model_name=args.rm, output_dir=str(out),
+    if not math.isfinite(args.vllm_gpu_memory_utilization) or not 0 < args.vllm_gpu_memory_utilization <= 1:
+        p.error("--vllm-gpu-memory-utilization must be in (0, 1]")
+    if args.vllm_tensor_parallel_size < 1:
+        p.error("--vllm-tensor-parallel-size must be positive")
+    if args.credit_microbatch_responses < 0:
+        p.error("--credit-microbatch-responses must be nonnegative")
+    if args.generation_microbatch < 1:
+        p.error("--generation-microbatch must be positive")
+    return args
+
+
+def build_trainer_config(args, output_dir):
+    return TrainerConfig(
+        model_name=args.model, reward_model_name=args.rm, output_dir=str(output_dir),
         method=args.method, rollout_iterations=args.max_rollouts,
         prompts_per_rollout=8, group_size=8,
         max_response_tokens=args.max_response_tokens,
         generation_microbatch_responses=args.generation_microbatch,
+        credit_microbatch_responses=args.credit_microbatch_responses,
         microbatch_responses=1, seed=args.seed, smoke=False,
         learning_rate=args.learning_rate, tau=args.tau,
         credit_lambda=args.credit_lambda, beta=args.beta,
@@ -106,9 +116,50 @@ def main():
         init_adapter=args.init_adapter, kl_reference=args.kl_reference,
         temperature=args.temperature, policy_epochs_per_rollout=args.policy_epochs,
         optimizer_minibatch_responses=args.optimizer_minibatch_responses,
-        actor_device="cuda:0", reward_device="cuda:1", allocated_gpu_count=3,
+        actor_device="cuda:0", reward_device="cuda:1",
+        allocated_gpu_count=2 + args.vllm_tensor_parallel_size,
         **length_reward_config_kwargs(args),
     ).resolved()
+
+
+def vllm_subprocess_environment(tensor_parallel_size, device_count, environ=None):
+    """Map logical generation GPUs back to the parent's physical IDs or UUIDs."""
+    expected = 2 + tensor_parallel_size
+    if device_count != expected:
+        raise RuntimeError(f"This profile requires exactly {expected} visible GPUs "
+                           f"(Actor + RM + {tensor_parallel_size} vLLM); got {device_count}")
+    env = dict(os.environ if environ is None else environ)
+    visible = env.get("CUDA_VISIBLE_DEVICES")
+    devices = [str(i) for i in range(device_count)] if visible is None else [
+        value.strip() for value in visible.split(",")]
+    if len(devices) != expected or any(not value for value in devices):
+        raise RuntimeError("CUDA_VISIBLE_DEVICES must identify every detected visible GPU")
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(devices[2:])
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def vllm_server_command(args, socket_path):
+    return [sys.executable, str(ROOT / "scripts/vllm_generate_server.py"),
+            "--model", args.model, "--socket", str(socket_path),
+            "--max-num-seqs", str(args.generation_microbatch),
+            "--seed", str(args.generation_seed),
+            "--gpu-memory-utilization", str(args.vllm_gpu_memory_utilization),
+            "--tensor-parallel-size", str(args.vllm_tensor_parallel_size)]
+
+
+def main():
+    args = parse_args()
+    gpu_count = 2 + args.vllm_tensor_parallel_size
+    env = vllm_subprocess_environment(args.vllm_tensor_parallel_size, torch.cuda.device_count())
+    out = Path(args.output_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    if (out / "metrics.jsonl").exists():
+        raise FileExistsError(f"Use a fresh output directory: {out}")
+    started = time.monotonic()
+    prompts, _, split = load_prompt_dataset("HuggingFaceH4/ultrafeedback_binarized", dataset_path=args.dataset_path,
+                                          exclude_benchmarks=True)
+    cfg = build_trainer_config(args, out)
     # Seed before PEFT initializes LoRA A matrices, not only in trainer.__init__.
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -125,8 +176,12 @@ def main():
         "config": asdict(cfg), "generation_seed": args.generation_seed,
         "sampling": trainer.sampling_manifest(), "resume_supported": False,
         "gpu_hours_definition": "elapsed_since_trainer_initialization_times_allocated_gpu_count",
-        "gpu_count": 3, "gpu_names": [torch.cuda.get_device_name(i) for i in range(3)],
+        "gpu_count": gpu_count, "gpu_names": [torch.cuda.get_device_name(i) for i in range(gpu_count)],
         "vllm_device": "cuda:2", "job_id": os.environ.get("JOB_ID"),
+        "vllm_devices": [f"cuda:{i}" for i in range(2, gpu_count)],
+        "vllm_engine": {"tensor_parallel_size": args.vllm_tensor_parallel_size,
+                        "gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                        "max_num_seqs": args.generation_microbatch, "max_model_len": 4096},
         "source_sha256": {f: hashlib.sha256((ROOT / f).read_bytes()).hexdigest()
                           for f in ["vpo_rm/trainer.py", "vpo_rm/integration.py", "vpo_rm/core.py",
                                     "vpo_rm/token_policy.py", "vpo_rm/alignment.py", "vpo_rm/data.py",
@@ -140,20 +195,12 @@ def main():
     adapter_id = 1
     trainer.actor.save_pretrained(adapter_path)
     setup_sec = time.monotonic() - started
-    print(f"devices actor=cuda:0 rm=cuda:1 vllm=cuda:2 method={cfg.method} "
+    print(f"devices actor=cuda:0 rm=cuda:1 vllm={list(range(2, gpu_count))} method={cfg.method} "
           f"requests=64 max_tokens={cfg.max_response_tokens} setup_sec={setup_sec:.2f}", flush=True)
     tmp = tempfile.TemporaryDirectory(prefix="vpo-vllm-")
     socket_path = Path(tmp.name) / "server.sock"
-    env = os.environ.copy()
-    visible = env.get("CUDA_VISIBLE_DEVICES", "0,1,2").split(",")
-    env["CUDA_VISIBLE_DEVICES"] = visible[2]
-    env["PYTHONUNBUFFERED"] = "1"
     server_started = time.monotonic()
-    server = subprocess.Popen([
-        sys.executable, str(ROOT / "scripts/vllm_generate_server.py"),
-        "--model", args.model, "--socket", str(socket_path),
-        "--max-num-seqs", str(args.generation_microbatch),
-        "--seed", str(args.generation_seed)], env=env)
+    server = subprocess.Popen(vllm_server_command(args, socket_path), env=env)
 
     def request(payload):
         if server.poll() is not None:
@@ -254,7 +301,7 @@ def main():
                       "generation": generation_stats,
                       "generation_requests": list(generation_requests),
                       "peak_allocated_gib": [torch.cuda.max_memory_allocated(i) / 2**30 for i in [0, 1]],
-                      "allocated_gpu_hours_since_setup": (time.monotonic() - started) * 3 / 3600}
+                      "allocated_gpu_hours_since_setup": (time.monotonic() - started) * gpu_count / 3600}
             records.append(record)
             with (out / "profile_metrics.jsonl").open("a") as f:
                 f.write(json.dumps(record) + "\n")
