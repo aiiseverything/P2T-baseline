@@ -19,6 +19,14 @@ def test_default_cli_preserves_three_gpu_h200_behavior():
     assert (cfg.prompts_per_rollout, cfg.group_size) == (8, 8)
     assert cfg.optimizer_minibatch_responses == 64
     assert cfg.credit_microbatch_responses == 0
+    assert cfg.checkpoint_interval == 100
+
+
+def test_profile_can_save_only_the_final_training_checkpoint():
+    args = profile.parse_args(["--output-dir", "unused", "--checkpoint-interval", "250"])
+    assert profile.build_trainer_config(args, "unused").checkpoint_interval == 250
+    with pytest.raises(SystemExit):
+        profile.parse_args(["--output-dir", "unused", "--checkpoint-interval", "0"])
 
 
 def test_portable_cli_reaches_trainer_and_real_server_parser():

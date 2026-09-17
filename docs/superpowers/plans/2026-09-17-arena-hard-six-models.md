@@ -1,0 +1,13 @@
+# Arena-Hard v2: six-model evaluation
+
+The user approved the proposed evaluation: the 500 hard prompts from Arena-Hard v2, Base / protected SFT init / corrected final GRPO / VPO lambda 2, 4, 8, GPT-4.1 with both answer orders, and raw plus length-and-Markdown-controlled scores. No training, checkpoint deletion, or public publication is required.
+
+1. Pin the upstream code revision and download only the question set and official hard-prompt baseline answers. Verify exactly 500 unique hard prompts and complete matching baseline coverage; record data hashes and train/evaluation overlap checks.
+2. Add a generator that preserves the existing Qwen prompt template, both EOS ids, token support, LoRA identities and explicit FP32 head. Use one response per prompt at temperature 1, top_p 1, top_k -1, seed 42. Inspect prompt lengths before fixing a shared context/output budget. Save official Arena answer metadata plus generation provenance; never overwrite previous benchmarks.
+3. Add the official five-outcome, two-position judge protocol with complete coverage validation, per-game resumable records, bounded dispatch, usage accounting and no silent dropping of invalid judgments. Use the existing configured relay securely; never print credentials. A fixed small pilot measures observed spend before the full 6,000 judgments, and its judgments are reused.
+4. Reuse the pinned official raw and combined length/Markdown-controlled aggregation. Audit sign conventions, score weighting, baseline identity, style metadata and bootstrap behavior. Provide uncertainty and record the precise judge/protocol version.
+5. Write targeted failing tests before new implementation, then run the relevant CPU regressions and independent reviews before GPU/API dispatch. Freeze all evaluation code, dependencies, models and inputs in a dedicated run suite. Confirm storage and runtime availability.
+6. Launch generation, validate all six sets of 500 responses, run the pilot and full judging when observed cost is consistent with the authorized evaluation. Save logs and progress so an interrupted host process can resume without repeating completed paid requests.
+7. Independently recompute final scores/coverage, write JSON/CSV and a reproducible README, and report results with length/truncation statistics and relevant limits.
+
+Ownership: generation and its tests; judging and its tests; upstream aggregation audit and implementation; root handles pinned data, manifests, job submission, pilot cost review, monitoring and integration. Existing unrelated workspace changes and the protected SFT remain untouched.

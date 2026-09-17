@@ -23,7 +23,9 @@ submit() { # name adapter-specs...
   shift
   local adapters="$*"
   [ -n "$adapters" ] || { echo "SKIP $name: no checkpoints available"; return; }
-  if rjob list 2>/dev/null | grep -q "showname=$name)"; then
+  local jobs
+  jobs="$(rjob list)" || return "$?"
+  if grep -Fq "showname=$name)" <<< "$jobs"; then
     echo "SKIP $name: rjob already exists"
     return
   fi

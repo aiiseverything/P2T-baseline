@@ -54,3 +54,26 @@ def test_floor_is_keyword_only_and_results_stay_detached():
         group_advantages(rewards, groups, 1e-6, .5)
     advantage, scale = group_advantages(rewards, groups, std_floor=.5)
     assert not advantage.requires_grad and not scale.requires_grad
+
+
+@pytest.mark.parametrize('eps', [math.nan, math.inf, -math.inf])
+def test_nonfinite_epsilon_is_rejected_before_creating_advantages(eps):
+    with pytest.raises(ValueError, match='eps'):
+        group_advantages(torch.tensor([1., 2.]), torch.tensor([0, 0]), eps=eps)
+
+
+def test_large_finite_rewards_do_not_overflow_group_statistics():
+    rewards = torch.tensor([3e38, 3e38, 2e38, 3e38])
+    advantage, scale = group_advantages(rewards, torch.tensor([0, 0, 1, 1]))
+    torch.testing.assert_close(advantage, torch.tensor([0., 0., -1., 1.]))
+    torch.testing.assert_close(scale, torch.tensor([1e-6, 1e-6, 5e37, 5e37]))
+
+
+@pytest.mark.parametrize('rewards,kwargs', [
+    (torch.tensor([1e300, 2e300], dtype=torch.float64), {}),
+    (torch.tensor([1., 2.]), {'std_floor': 1e40}),
+    (torch.tensor([1., 1.]), {'eps': 1e-50}),
+])
+def test_unrepresentable_rewards_or_scale_fail_before_returning_invalid_credit(rewards, kwargs):
+    with pytest.raises(ValueError, match='float32|representable'):
+        group_advantages(rewards, torch.tensor([0, 0]), **kwargs)

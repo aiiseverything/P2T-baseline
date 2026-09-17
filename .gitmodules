@@ -1,0 +1,3 @@
+[submodule "third_party/arena_hard"]
+	path = third_party/arena_hard
+	url = https://github.com/lmarena/arena-hard-auto.git

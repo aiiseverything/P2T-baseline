@@ -21,11 +21,11 @@ def launcher(tmp_path):
     env = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}",
                PROJECT_ROOT=str(project), SHELL_TEST_ROOT=str(project),
                SHELL_TEST_TRACE=str(trace), JOB_ID="launcher-test")
-    # The pre-fix launchers hard-code this checkout. Redirect only that cd to
-    # the temporary project; all shell branching and argument expansion is real.
+    # Historical launchers assign their original checkout to R. Redirect the
+    # selected R as well as cwd, even when these tests run from a fresh clone.
     bash_env = tmp_path / "bash_env"
-    bash_env.write_text('cd() { if [[ "${1:-}" = "' + str(ROOT) + '" ]]; then '
-                        'builtin cd "$SHELL_TEST_ROOT"; else builtin cd "$@"; fi; }\n')
+    bash_env.write_text('cd() { if [[ "${1:-}" = "${R:-}" || "${1:-}" = "' + str(ROOT) + '" ]]; then '
+                        'R="$SHELL_TEST_ROOT"; builtin cd "$SHELL_TEST_ROOT"; else builtin cd "$@"; fi; }\n')
     env["BASH_ENV"] = str(bash_env)
     recorder = f'''#!{sys.executable}
 import json, os, pathlib, sys
@@ -188,3 +188,27 @@ else:
                 and any(arg.startswith("SFT_OUTPUT=") for arg in r["args"])]
     assert len(sft_jobs) == 1, "An old non-native SFT job must not suppress the new native prerequisite"
     assert any(arg.endswith("/models/sft-native-eos-qwen3-8b-base") for arg in sft_jobs[0]["args"])
+
+
+@pytest.mark.parametrize("script", ["submit_gsm8k_batch.sh", "submit_ifeval_batch.sh",
+                                    "submit_p11_combo_batch.sh", "submit_rm_eval_batch.sh"])
+def test_eval_submission_does_not_treat_failed_scheduler_listing_as_absent_job(launcher, script):
+    adapter = launcher.project / "runs/formal-skywork-grpo-p10-grpo-baseline2-69550359/vllm-adapters/step-50"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text("{}")
+    scheduler = launcher.commands / "rjob"
+    scheduler.write_text(f'''#!{sys.executable}
+import json, os, sys
+with open(os.environ["SHELL_TEST_TRACE"], "a") as out:
+    out.write(json.dumps({{"command": "rjob", "args": sys.argv[1:]}}) + "\\n")
+if sys.argv[1] == "list":
+    raise SystemExit(23)
+print("stubbed submission")
+''')
+    scheduler.chmod(0o755)
+    sleep = launcher.commands / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    result, records = launcher(script)
+    assert result.returncode != 0
+    assert not [r for r in records if r["command"] == "rjob" and r["args"][0] == "submit"]

@@ -17,7 +17,9 @@ mkdir -p "$OUTROOT"
 submit() { # name adapters
   local name="$1" adapters="$2"
   [ -n "$adapters" ] || { echo "SKIP $name: no adapters"; return; }
-  if rjob list 2>/dev/null | grep -q "showname=$name)"; then
+  local jobs
+  jobs="$(rjob list)" || return "$?"
+  if grep -Fq "showname=$name)" <<< "$jobs"; then
     echo "SKIP $name: rjob already exists"
     return
   fi

@@ -33,21 +33,28 @@ def group_advantages(rewards: Tensor, group_ids: Tensor, eps: float = 1e-6,
     """
     if rewards.ndim != 1 or group_ids.shape != rewards.shape:
         raise ValueError("rewards and group_ids must have shape [B]")
-    if eps <= 0 or not torch.isfinite(rewards).all():
-        raise ValueError("Rewards must be finite and eps positive")
+    if not math.isfinite(eps) or eps <= 0 or not torch.isfinite(rewards).all():
+        raise ValueError("Rewards must be finite and eps finite and positive")
     if not math.isfinite(std_floor) or std_floor < 0:
         raise ValueError("std_floor must be finite and nonnegative")
     rewards = rewards.float()
+    if not torch.isfinite(rewards).all():
+        raise ValueError("Rewards must be representable in float32")
     advantage, scale = torch.empty_like(rewards), torch.empty_like(rewards)
     for group in group_ids.unique():
         selected = group_ids == group
-        r = rewards[selected]
+        # Reduction in double avoids overflowing a finite FP32 group's mean
+        # and variance, including constant groups near the FP32 maximum.
+        r = rewards[selected].double()
         if r.numel() < 2:
             raise ValueError("Each complete prompt group must contain at least two responses")
         std = r.std(correction=0)
         std = std.clamp_min(std_floor) if std_floor > 0 else std + eps
-        advantage[selected] = (r - r.mean()) / std
-        scale[selected] = std
+        stored_std = std.float()
+        if not torch.isfinite(stored_std) or stored_std <= 0:
+            raise ValueError("Group reward scale must be positive and representable in float32")
+        advantage[selected] = ((r - r.mean()) / std).float()
+        scale[selected] = stored_std
     return advantage, scale
 
 
@@ -58,11 +65,14 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
              freeze_stop_tokens: bool = False,
              freeze_structural: bool = False,
              stop_token_ids: tuple[int, ...] | None = None,
-             structural_token_ids: tuple[int, ...] | None = None) -> Credit:
+             structural_token_ids: tuple[int, ...] | None = None,
+             fixed_weight_mask: Tensor | None = None) -> Credit:
     """Allocate advantage within the final [1/lambda, lambda] weight band.
 
     Frozen positions receive exactly one unit of credit. Standardization and
     softmax use only the remaining positions, whose budget is their count.
+    ``fixed_weight_mask`` adds valid positions without an exact RM mapping to
+    those frozen by the tokenizer-derived stop/structural policy.
     Structural freezing requires IDs verified against the actual tokenizer.
     The default stop IDs only preserve direct callers using the Qwen vocabulary;
     production callers should pass both sets from ``token_policy``.
@@ -72,6 +82,12 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         raise ValueError("Expected direction [B, T] and advantage [B]")
     if any(x.device != direction.device for x in (advantage, mask)):
         raise ValueError("Credit tensors must be on the same device")
+    if fixed_weight_mask is not None:
+        if (not isinstance(fixed_weight_mask, Tensor) or fixed_weight_mask.shape != mask.shape
+                or fixed_weight_mask.dtype != torch.bool or fixed_weight_mask.device != mask.device):
+            raise ValueError("fixed_weight_mask must be boolean [B,T] on the credit device")
+        if (fixed_weight_mask & ~mask).any():
+            raise ValueError("fixed_weight_mask may select valid response tokens only")
     if not math.isfinite(tau) or tau <= 0 or tau > torch.finfo(torch.float32).max:
         raise ValueError("tau must be finite, positive and representable in float32")
     if not math.isfinite(credit_lambda) or credit_lambda < 1:
@@ -94,12 +110,12 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
         weight = mask.float()
         return Credit(a[:, None] * weight, d, weight, tau_used)
 
-    frozen = torch.zeros_like(mask)
+    frozen = torch.zeros_like(mask) if fixed_weight_mask is None else fixed_weight_mask.clone()
     if freeze_stop_tokens or freeze_structural:
         stop_ids = (151643, 151645) if stop_token_ids is None else stop_token_ids
         ids = tuple(stop_ids) + (tuple(structural_token_ids) if freeze_structural else ())
         if ids:
-            frozen = torch.isin(token_ids, torch.as_tensor(ids, device=mask.device)) & mask
+            frozen |= torch.isin(token_ids, torch.as_tensor(ids, device=mask.device)) & mask
     free = mask & ~frozen
     counts = free.sum(-1, keepdim=True).float()
     divisor = counts.clamp_min(1)
@@ -207,7 +223,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    freeze_structural: bool = False,
                    stop_token_ids: tuple[int, ...] | None = None,
                    structural_token_ids: tuple[int, ...] | None = None,
-                   policy_temperature: float = 1.0) -> Credit:
+                   policy_temperature: float = 1.0,
+                   fixed_weight_mask: Tensor | None = None) -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -271,18 +288,65 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
     return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
                     token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens,
                     freeze_structural=freeze_structural,
-                    stop_token_ids=stop_token_ids, structural_token_ids=structural_token_ids)
+                    stop_token_ids=stop_token_ids, structural_token_ids=structural_token_ids,
+                    fixed_weight_mask=fixed_weight_mask)
+
+
+@torch.no_grad()
+def rollout_importance_weights(old_logp: Tensor, rollout_logp: Tensor,
+                               response_mask: Tensor) -> Tensor:
+    """Frozen token correction from the sampler to the HF clipping anchor.
+
+    Valid probabilities must be finite, nonpositive floating log probabilities.
+    Return positive finite FP32 ratios without clipping or normalization; padded
+    entries are one. This conditional token correction does not correct the
+    complete sequence/group sampling distribution.
+    """
+    if any(not isinstance(x, Tensor) or not x.is_floating_point()
+           for x in (old_logp, rollout_logp)):
+        raise ValueError("Old and rollout log probabilities must be floating tensors")
+    if not isinstance(response_mask, Tensor):
+        raise ValueError("response_mask must be a binary [B, T] tensor")
+    if any(x.shape != response_mask.shape for x in (old_logp, rollout_logp)):
+        raise ValueError("Old/rollout log probabilities and mask must have shape [B,T]")
+    if any(x.device != old_logp.device for x in (rollout_logp, response_mask)):
+        raise ValueError("Old/rollout log probabilities and mask must share a device")
+    mask = _mask(response_mask)
+    for values in (old_logp, rollout_logp):
+        if not torch.isfinite(values[mask]).all() or (values[mask] > 0).any():
+            raise ValueError("Valid log probabilities must be finite and nonpositive")
+    old = old_logp.detach().float().masked_fill(~mask, 0)
+    rollout = rollout_logp.detach().float().masked_fill(~mask, 0)
+    if not torch.isfinite(old).all() or not torch.isfinite(rollout).all():
+        raise ValueError("Valid log probabilities must be representable in float32")
+    weights = (old - rollout).exp()
+    if not (torch.isfinite(weights) & (weights > 0)).all():
+        raise ValueError("Rollout importance weights must be positive and finite in float32")
+    return weights
 
 
 def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor,
-                     response_mask: Tensor, clip_eps: float = 0.2) -> Tensor:
+                     response_mask: Tensor, clip_eps: float = 0.2, *,
+                     importance_weights: Tensor | None = None) -> Tensor:
     """Negative clipped objective: average tokens per response, then responses.
 
-    Add the existing trainer's KL term with its original estimator and reduction.
+    Optional frozen importance weights correct sampler/HF differences outside
+    PPO clipping. Add the trainer's KL term separately with its declared
+    estimator and the same response reduction.
     """
     mask = _mask(response_mask)
     if any(x.shape != mask.shape for x in (new_logp, old_logp, token_advantage)):
         raise ValueError("log probabilities, advantage and mask must have shape [B,T]")
+    weights = None
+    if importance_weights is not None:
+        if (not isinstance(importance_weights, Tensor) or not importance_weights.is_floating_point()
+                or importance_weights.shape != mask.shape
+                or importance_weights.device != new_logp.device
+                or importance_weights.device != mask.device):
+            raise ValueError("importance_weights must be floating [B,T] on the loss device")
+        weights = importance_weights.detach().float().masked_fill(~mask, 1)
+        if not (torch.isfinite(weights) & (weights > 0)).all():
+            raise ValueError("Valid importance weights must be positive and finite in float32")
     if not 0 < clip_eps < 1:
         raise ValueError("clip_eps must lie in (0,1)")
     # Mask before exponentiation so padded NaNs cannot affect backward.
@@ -301,6 +365,10 @@ def grpo_policy_loss(new_logp: Tensor, old_logp: Tensor, token_advantage: Tensor
     # Combine the advantage scale before exp: even an overflowing raw ratio
     # may have a representable objective and gradient when |A| is tiny.
     log_scale = a.abs().masked_fill(a == 0, 1).log()
+    if weights is not None:
+        # Combine factors before exp, retaining small-weight cancellation of a
+        # large ratio. Zero advantages stay zero even at the FP32 weight limit.
+        log_scale = log_scale + weights.log().masked_fill(a == 0, 0)
     objective = a.sign() * (selected_log_ratio + log_scale).exp()
     if not torch.isfinite(objective).all():
         raise ValueError("Policy objective overflow; gradients would not be finite")

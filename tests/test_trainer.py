@@ -5,14 +5,13 @@ from torch import nn
 
 from vpo_rm.reward import LastTokenReward
 from vpo_rm.trainer import VPOTrainer
+from bytelevel_fixtures import ByteLevelTestTokenizer
 
 
-class _Tok:
-    pad_token_id = 0
-    eos_token_id = 0
-    def __call__(self, text, add_special_tokens=True):
-        # deterministic two-token prompt prefix
-        return {"input_ids": [1, 2]}
+class _Tok(ByteLevelTestTokenizer):
+    def __init__(self):
+        super().__init__({"<|endoftext|>": 0, "p": 1, "a": 2, "b": 3,
+                          "c": 4, "d": 5, "e": 6, "<|im_end|>": 7})
 
 
 class _Backbone(nn.Module):
@@ -22,7 +21,7 @@ class _Backbone(nn.Module):
     def get_input_embeddings(self):
         return self.emb
     def forward(self, inputs_embeds, attention_mask, position_ids=None, use_cache=False, return_dict=True):
-        return types.SimpleNamespace(last_hidden_state=inputs_embeds)
+        return types.SimpleNamespace(last_hidden_state=(inputs_embeds * attention_mask[..., None]).cumsum(1))
 
 
 class _Score(nn.Module):
@@ -34,7 +33,7 @@ def _trainer(method):
     t = object.__new__(VPOTrainer)
     t.cfg = types.SimpleNamespace(method=method, microbatch_responses=1)
     t.reward_device = torch.device("cpu")
-    t.reward_tokenizer = _Tok()
+    t.actor_tokenizer = t.reward_tokenizer = _Tok()
     t.reward = LastTokenReward(_Backbone(), _Score())
     return t
 
@@ -57,6 +56,7 @@ def test_grpo_reward_is_forward_only_and_matches_gradient_path_score():
     torch.testing.assert_close(grpo_scores, vpo_scores)
     assert grpo_grads is None
     assert vpo_grads.shape == (2, 3, 4)
+    assert vpo_grads[valid].abs().sum() > 0
     assert all(p.grad is None for p in grpo.reward.parameters())
 
 

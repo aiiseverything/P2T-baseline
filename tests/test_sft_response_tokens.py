@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class ResponseEosTokensTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not (ROOT / "models/Qwen3-14B-Base/tokenizer_config.json").exists():
+            raise unittest.SkipTest(
+                "Local Qwen3-14B-Base tokenizer assets are not installed"
+            )
         cls.tokenizer = AutoTokenizer.from_pretrained(
             ROOT / "models/Qwen3-14B-Base", local_files_only=True
         )

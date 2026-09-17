@@ -31,7 +31,15 @@ def _resolve_benchmark_paths(benchmark_paths) -> dict[str, Path]:
         return dict(DEFAULT_BENCHMARK_PATHS)
     if isinstance(benchmark_paths, Mapping):
         return {str(name): Path(path) for name, path in benchmark_paths.items()}
-    return {Path(path).stem: Path(path) for path in benchmark_paths}
+    resolved = {}
+    for path in benchmark_paths:
+        path = Path(path)
+        if path.stem in resolved:
+            raise ValueError(
+                f"duplicate benchmark name {path.stem!r}; use an explicit name-to-path mapping"
+            )
+        resolved[path.stem] = path
+    return resolved
 
 
 def _load_benchmark_keys(path: Path) -> set[str]:
@@ -67,11 +75,14 @@ def exclude_benchmark_prompts(prompts, benchmark_paths=None):
 
     first_by_key = {}
     input_count = 0
+    empty_prompt_count = 0
     for prompt in prompts:
         input_count += 1
         original = str(prompt)
         key = normalize_prompt(original)
-        if key and key not in first_by_key:
+        if not key:
+            empty_prompt_count += 1
+        elif key not in first_by_key:
             first_by_key[key] = original
 
     excluded_keys = set(first_by_key).intersection(excluded_union)
@@ -81,7 +92,8 @@ def exclude_benchmark_prompts(prompts, benchmark_paths=None):
         "normalization": "unicode_nfc_whitespace_collapse",
         "input_count": input_count,
         "unique_input_count": len(first_by_key),
-        "duplicate_count": input_count - len(first_by_key),
+        "duplicate_count": input_count - empty_prompt_count - len(first_by_key),
+        "empty_prompt_count": empty_prompt_count,
         "excluded_count": len(excluded_keys),
         "output_count": len(filtered),
         "benchmark_paths": {name: str(path) for name, path in paths.items()},

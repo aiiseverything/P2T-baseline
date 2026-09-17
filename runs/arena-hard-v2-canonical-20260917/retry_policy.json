@@ -1,0 +1,14 @@
+{
+  "policy": "arena_identical_request_invalid_output_retry_v1",
+  "declared_at": "2026-09-17T05:24:22.246944+00:00",
+  "scope": "All six models, all 500 questions, both answer orders; pilot and full run",
+  "max_total_attempts_per_game": 5,
+  "eligible": "Completed API response persisted as invalid because no accepted verdict or truncated finish; no automatic retries for ambiguous/inflight transport states",
+  "request_invariance": "Byte-identical model/system/user messages/temperature0/max_tokens16000; frozen official protocol unchanged",
+  "selection": "First valid judgment; no retries based on winner, tie, or score",
+  "archives": "Every superseded attempt is retained byte-for-byte in a contiguous predecessor chain; cost includes all attempts",
+  "budget": "Same cumulative relay usage dispatch guard, including pilot and all retries",
+  "exhaustion": "Stop as incomplete; do not drop question, fill tie, change prompt or increase token cap",
+  "reason": "In pilot three requests on one ambiguous question looped to max_tokens; first unchanged-protocol retry recovered two, one remained truncated",
+  "frozen_judge_sha256": "0f59fd78c0dd285fc7026c23290485adc45bd093b5a3788fcf5743abd06a4c0a"
+}

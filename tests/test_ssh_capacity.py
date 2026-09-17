@@ -31,6 +31,9 @@ def tokenizers():
                                      padding_side="right" if rm else "left")
         prefix = "<user> <rm> " if rm else "<user> "
         tok.chat_template = "{{ '" + prefix + "' + messages[0]['content'] + ' <assistant>' }}"
+        if rm:
+            tok.chat_template += ("{% if messages|length > 1 %}"
+                                  "{{ ' ' + messages[1]['content'] + ' <eos>' }}{% endif %}")
         result.append(tok)
     return result
 
@@ -71,7 +74,7 @@ def test_synthetic_prompts_reach_joint_limit_through_both_real_templates():
     assert len(prompts) == len(set(prompts)) == 8
     for prompt in prompts:
         actor_length, reward_length = capacity.prompt_lengths(actor, reward, prompt)
-        assert actor_length == 31 and reward_length == 32
+        assert actor_length == 30 and reward_length == 32
         assert max(capacity.prompt_lengths(actor, reward, prompt + " alpha")) > 32
 
 
@@ -79,6 +82,20 @@ def test_too_small_prompt_limit_is_rejected_instead_of_truncating():
     actor, reward = tokenizers()
     with pytest.raises(ValueError, match="prompt.*limit|limit.*prompt"):
         capacity.make_synthetic_prompts(actor, reward, count=8, max_prompt_tokens=2)
+
+
+def test_capacity_counts_closed_reward_template_and_actual_response_tokens():
+    trainer = fixture_trainer(group_size=2, prompt_limit=32, response_limit=8)
+    trainer.reward_tokenizer.chat_template = (
+        "{{ '<user> <rm> ' + messages[0]['content'] + ' <assistant>' }}"
+        "{% if messages|length > 1 %}{{ ' ' + messages[1]['content'] + ' <eos> <rm>' }}{% endif %}")
+    assert capacity.prompt_lengths(trainer.actor_tokenizer, trainer.reward_tokenizer, 'alpha') == (3, 6)
+    _, shape = capacity.build_synthetic_rollout(trainer, ['alpha'])
+    # Four prefix tokens, seven ordinary response tokens, two template suffix
+    # tokens. Actor's native EOS is removed before canonical RM serialization.
+    assert shape['reward_prompt_lengths'] == [6]
+    assert shape['reward_sequence_lengths'] == [13, 13]
+    assert shape['reward_max_sequence_length'] == 13
 
 
 def test_full_64_by_2048_response_shape_eos_mask_and_alignment():
@@ -90,7 +107,7 @@ def test_full_64_by_2048_response_shape_eos_mask_and_alignment():
     assert responses.shape == (64, 2048)
     assert valid.shape == responses.shape and valid.all()
     assert reasons == ["stop"] * 64
-    assert len(rendered) == 64 and ids.shape == (64, 31 + 2048)
+    assert len(rendered) == 64 and ids.shape == (64, 30 + 2048)
     assert (responses[:, -1] == trainer.actor_tokenizer.eos_token_id).all()
     for stop in trainer.stop_token_ids:
         assert not (responses[:, :-1] == stop).any()
@@ -101,12 +118,13 @@ def test_full_64_by_2048_response_shape_eos_mask_and_alignment():
     check_response_tokens(ids, mask, positions, responses, valid)
     for row in range(64):
         expected = VPOTrainer._render_chat_prompt(trainer.actor_tokenizer, prompts[row // 8], tokenize=True)
-        assert ids[row, :31].tolist() == expected
+        assert ids[row, :30].tolist() == expected
     assert shape["response_shape"] == [64, 2048]
-    assert shape["actor_prompt_lengths"] == [31] * 8
+    assert shape["actor_prompt_lengths"] == [30] * 8
     assert shape["reward_prompt_lengths"] == [32] * 8
-    assert shape["actor_padded_prompt_width"] == 31
-    assert shape["reward_max_sequence_length"] == 32 + 2048
+    assert shape["actor_padded_prompt_width"] == 30
+    assert shape["reward_sequence_lengths"] == [32 + 2047] * 64
+    assert shape["reward_max_sequence_length"] == 32 + 2047
     assert shape["native_eos_id"] == trainer.actor_tokenizer.eos_token_id
 
 

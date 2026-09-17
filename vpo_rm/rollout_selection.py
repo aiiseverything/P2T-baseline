@@ -6,6 +6,7 @@ from torch import Tensor
 
 from .alignment import check_response_tokens
 from .length_reward import response_degeneracy
+from .integration import validate_response_termination
 
 
 @dataclass
@@ -15,13 +16,40 @@ class _Row:
     rendered: str
     finish_reason: str
     degenerate: bool
+    rollout_logp: Tensor | None
+
+
+def validate_rollout_logprobs(rollout, required: bool = False) -> Tensor | None:
+    """Validate optional sampling probabilities on actual response tokens only.
+
+    Missing probabilities are allowed for the original seven-field HF rollout.
+    Padding values carry no probability information and are deliberately ignored.
+    """
+    if not isinstance(rollout, (tuple, list)) or len(rollout) not in (7, 8):
+        raise ValueError('rollout must contain seven fields and optional rollout logprobabilities')
+    logp = rollout[7] if len(rollout) == 8 else None
+    if logp is None:
+        if required:
+            raise ValueError('rollout logprobabilities are required for importance correction')
+        return None
+    responses, mask = rollout[3:5]
+    if (not isinstance(logp, Tensor) or not logp.is_floating_point()
+            or not isinstance(responses, Tensor) or not isinstance(mask, Tensor)
+            or logp.ndim != 2 or logp.shape != responses.shape or logp.shape != mask.shape):
+        raise ValueError('rollout logprobabilities must be floating tensors matching response shape')
+    if logp.device != responses.device or logp.device != mask.device:
+        raise ValueError('rollout logprobabilities must share the response device')
+    selected = logp[mask.bool()]
+    if not torch.isfinite(selected).all() or (selected > 0).any():
+        raise ValueError('valid rollout logprobabilities must be finite and nonpositive')
+    return logp
 
 
 def _validate_sample(trainer, rollout, prompt_count: int) -> list[_Row]:
     """Validate the original positions and support before any sample is dropped."""
-    if not isinstance(rollout, (tuple, list)) or len(rollout) != 7:
-        raise ValueError("rollout must contain seven fields, including finish reasons")
-    ids, attention, positions, responses, mask, rendered, reasons = rollout
+    if not isinstance(rollout, (tuple, list)) or len(rollout) not in (7, 8):
+        raise ValueError("rollout must contain seven fields and optional rollout logprobabilities")
+    ids, attention, positions, responses, mask, rendered, reasons = rollout[:7]
     tensors = (ids, attention, positions, responses, mask)
     if any(not isinstance(x, Tensor) or x.ndim != 2 for x in tensors):
         raise ValueError("rollout tensors must be two-dimensional")
@@ -42,12 +70,16 @@ def _validate_sample(trainer, rollout, prompt_count: int) -> list[_Row]:
     if any(not ((x == 0) | (x == 1)).all() for x in (attention, mask)):
         raise ValueError("rollout attention and response masks must be binary")
     valid = mask.bool()
+    rollout_logp = validate_rollout_logprobs(rollout,
+        required=getattr(trainer.cfg, 'rollout_importance_correction', False))
     lengths = valid.sum(-1)
     if ((lengths < 1) | (lengths > trainer.cfg.max_response_tokens)).any():
         raise ValueError("rollout responses must be nonempty and within max_response_tokens")
     expected_mask = torch.arange(mask.shape[1], device=mask.device)[None, :] < lengths[:, None]
     if not torch.equal(valid, expected_mask):
         raise ValueError("rollout responses must be right padded")
+    validate_response_termination(responses, valid, reasons, trainer.stop_token_ids,
+                                  trainer.cfg.max_response_tokens)
     support = trainer.output_mask
     if not isinstance(support, Tensor) or support.ndim != 1 or support.dtype != torch.bool:
         raise ValueError("trainer output_mask must be a one-dimensional boolean tensor")
@@ -84,7 +116,8 @@ def _validate_sample(trainer, rollout, prompt_count: int) -> list[_Row]:
         if i % trainer.cfg.group_size and not torch.equal(prefix, rows[-1].prefix):
             raise ValueError("rollout prompt prefix differs within a prompt group")
         rows.append(_Row(prefix, responses[i, valid[i]], rendered[i], reasons[i],
-                         empty[i] or repeated[i]))
+                         empty[i] or repeated[i],
+                         rollout_logp[i, valid[i]] if rollout_logp is not None else None))
     return rows
 
 
@@ -102,6 +135,15 @@ def _pack_rows(trainer, rows: list[_Row], original):
     attention = original[1].new_zeros(ids.shape)
     responses = original[3].new_full((batch, response_width), pad_id)
     mask = original[4].new_zeros(responses.shape)
+    available_logps = [row.rollout_logp for row in rows if row.rollout_logp is not None]
+    if available_logps and len(available_logps) != batch:
+        raise ValueError('cannot repack mixed present and missing rollout logprobabilities')
+    logp = None
+    if available_logps:
+        dtype = available_logps[0].dtype
+        for values in available_logps[1:]:
+            dtype = torch.promote_types(dtype, values.dtype)
+        logp = torch.zeros(responses.shape, device=ids.device, dtype=dtype)
     for i, row in enumerate(rows):
         length = row.response.numel()
         ids[i, prompt_width - row.prefix.numel():prompt_width] = row.prefix
@@ -109,10 +151,14 @@ def _pack_rows(trainer, rows: list[_Row], original):
         attention[i, prompt_width - row.prefix.numel():prompt_width + length] = 1
         responses[i, :length] = row.response
         mask[i, :length] = 1
+        if logp is not None:
+            logp[i, :length] = row.rollout_logp
     positions = torch.arange(prompt_width, prompt_width + response_width,
                              device=ids.device).expand(batch, -1)
     result = (ids, attention, positions, responses, mask,
               [row.rendered for row in rows], [row.finish_reason for row in rows])
+    if logp is not None or len(original) == 8:
+        result = (*result, logp)
     check_response_tokens(*result[:5])
     return result
 

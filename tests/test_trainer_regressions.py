@@ -11,23 +11,22 @@ import torch
 from torch import nn
 
 from vpo_rm.trainer import TrainerConfig, VPOTrainer
+from bytelevel_fixtures import ByteLevelTestTokenizer
 
 
-class TinyTokenizer:
-    eos_token_id = 0
-    eos_token = "<|endoftext|>"
-    pad_token_id = 0
-    pad_token = eos_token
-    bos_token_id = 1
-    all_special_ids = [0, 6]
-    def get_vocab(self):
-        return {"<|endoftext|>": 0, "p": 1, "a": 2, "b": 3, "c": 4, "d": 5, "<|im_end|>": 6}
-    def convert_tokens_to_ids(self, token):
-        return self.get_vocab().get(token)
-    def decode(self, ids, **kwargs):
-        return "".join({v:k for k,v in self.get_vocab().items()}.get(i, "?") for i in ids)
-    def __call__(self, text, add_special_tokens=True):
-        return {"input_ids": [1]}
+@pytest.fixture
+def isolated_benchmarks(tmp_path, monkeypatch):
+    from vpo_rm import data
+
+    benchmark = tmp_path / "benchmark.jsonl"
+    benchmark.write_text(json.dumps({"instruction": "held-out benchmark prompt"}) + "\n")
+    monkeypatch.setattr(data, "DEFAULT_BENCHMARK_PATHS", {"synthetic": benchmark})
+
+
+class TinyTokenizer(ByteLevelTestTokenizer):
+    def __init__(self):
+        super().__init__({"<|endoftext|>": 0, "p": 1, "a": 2, "b": 3,
+                          "c": 4, "d": 5, "<|im_end|>": 6})
 
 
 class TinyActor(nn.Module):
@@ -141,7 +140,7 @@ def test_unsupported_sample_is_rejected_before_optimizer_step(tmp_path):
 
 def test_reward_guard_uses_finish_reason_not_length(tmp_path):
     t=trainer(tmp_path,length_penalty_slope=.1,length_penalty_anchor=1)
-    fixed_rollout(t,torch.tensor([[2,3,4,0],[2,3,4,5]]),["stop","length"])
+    fixed_rollout(t,torch.tensor([[2,3,4,5,0],[2,3,4,5,2]]),["stop","length"])
     result=t.train_rollout(["p"])
     assert result["truncated_responses"]==1
     assert result["degenerate_responses"]==1
@@ -188,7 +187,7 @@ def test_unsupported_sampling_or_dropout_is_rejected(kwargs):
         TrainerConfig(**kwargs).resolved()
 
 
-def test_split_small_custom_file_never_reuses_validation_for_training(tmp_path):
+def test_split_small_custom_file_never_reuses_validation_for_training(tmp_path, isolated_benchmarks):
     from scripts import train_skywork
     source=tmp_path/"prompts.txt"; source.write_text("first\nsecond\n")
     fake=types.SimpleNamespace(filter_prompts=lambda p:p,filtered_prompt_count=0,
@@ -200,7 +199,7 @@ def test_split_small_custom_file_never_reuses_validation_for_training(tmp_path):
     assert meta["filtered_train_prompts"]==1
 
 
-def test_existing_native_output_is_rejected_before_split_or_model_overwrite(tmp_path):
+def test_existing_native_output_is_rejected_before_split_or_model_overwrite(tmp_path, isolated_benchmarks):
     from scripts import train_skywork
     source=tmp_path/"prompts.txt"; source.write_text("first\nsecond\n")
     out=tmp_path/"old"; out.mkdir()

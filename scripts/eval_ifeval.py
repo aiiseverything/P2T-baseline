@@ -8,6 +8,8 @@ Each "adapter" entry is TAG=PATH and is evaluated inside one shared vLLM engine,
 so checkpoint sweeps amortize the model load. The literal path "none" evaluates
 the bare base model without LoRA. Sampling is configured per "recipe"
 temp:n_samples:top_p:top_k; multi-sample recipes report mean@N.
+Use --seeds 42 43 44 45 46 --scoring-seed 42 for separate full evaluations
+under seed-specific output directories, sharing a single loaded engine.
 
 Usage (in rjob):
   python3 scripts/eval_ifeval.py \
@@ -20,7 +22,9 @@ Usage (in rjob):
 from __future__ import annotations
 
 import argparse
+from itertools import product
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -28,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
                                     eval_config, fingerprint, validate_outputs, validate_adapter_base)
+from scripts.eval_policy import resolve_shared_policy, policy_engine_kwargs
 import math
 sys.path.insert(0, str(ROOT / "third_party" / "ifeval"))
 
@@ -72,12 +77,23 @@ def make_inputs(data):
     return [Inp(row) for row in data]
 
 
-def score_one_sample(inp_list, responses, evaluation_lib):
-    """Run the official strict + loose checkers on one response per prompt."""
+def score_one_sample(inp_list, responses, evaluation_lib, scoring_seed=42):
+    """Keep official checker randomness identical across modes and models."""
+    from langdetect import DetectorFactory
+
     prompt_to_response = {inp.prompt: resp for inp, resp in zip(inp_list, responses)}
-    strict = [evaluation_lib.test_instruction_following_strict(inp, prompt_to_response) for inp in inp_list]
-    loose = [evaluation_lib.test_instruction_following_loose(inp, prompt_to_response) for inp in inp_list]
-    return strict, loose
+    random_state = random.getstate()
+    detector_seed = DetectorFactory.seed
+    try:
+        DetectorFactory.seed = scoring_seed
+        random.seed(scoring_seed)
+        strict = [evaluation_lib.test_instruction_following_strict(inp, prompt_to_response) for inp in inp_list]
+        random.seed(scoring_seed)
+        loose = [evaluation_lib.test_instruction_following_loose(inp, prompt_to_response) for inp in inp_list]
+        return strict, loose
+    finally:
+        random.setstate(random_state)
+        DetectorFactory.seed = detector_seed
 
 
 def aggregate(inp_list, strict, loose) -> dict:
@@ -127,7 +143,8 @@ def run_selftest(args) -> None:
     samples = [["Hello."] * len(inp_list), ["word " * 120] * len(inp_list)]
     per_sample = []
     for responses in samples:
-        strict, loose = score_one_sample(inp_list, responses, evaluation_lib)
+        strict, loose = score_one_sample(inp_list, responses, evaluation_lib,
+                                         scoring_seed=args.scoring_seed)
         per_sample.append(aggregate(inp_list, strict, loose))
     mean = mean_over_samples(per_sample)
     for tag, m in zip(["sample0", "sample1"], per_sample):
@@ -184,11 +201,27 @@ def main():
                    help="Sampling recipes temp:n_samples:top_p:top_k "
                         "(default: training temperature, single sample)")
     p.add_argument("--max-tokens", type=int, default=1280)
-    p.add_argument("--seed", type=int, default=42)
+    seed_group = p.add_mutually_exclusive_group()
+    seed_group.add_argument("--seed", type=int, default=None,
+                            help='Single generation seed (default: 42)')
+    seed_group.add_argument('--seeds', type=int, nargs='+',
+                            help='Distinct generation seeds; each writes output/seed-N/TAG')
+    p.add_argument('--scoring-seed', type=int, default=None,
+                   help='Fixed checker seed; defaults to the first generation seed')
+    p.add_argument('--policy-head-dtype', choices=('auto', 'native', 'float32'), default='auto',
+                   help='Read adapter manifests by default; undeclared legacy adapters use native precision')
     p.add_argument("--selftest", action="store_true",
                    help="Run the offline scoring selftest and exit (no GPU)")
     args = p.parse_args()
     recipes = [parse_recipe(s) for s in args.recipes]
+    if args.seed is None:
+        args.seed = 42
+    seeds = args.seeds if args.seeds is not None else [args.seed]
+    if len(seeds) != len(set(seeds)):
+        p.error('Generation seeds must be distinct')
+    engine_seed = seeds[0]
+    if args.scoring_seed is None:
+        args.scoring_seed = engine_seed
 
     if args.selftest:
         run_selftest(args)
@@ -197,6 +230,7 @@ def main():
     adapters = parse_adapters(args.adapters) if args.adapters else [("model", "none")]
     if not args.output:
         p.error("--output is required unless --selftest")
+    head, policies = resolve_shared_policy([path for _, path in adapters], args.policy_head_dtype)
 
     # Install check: official evaluation code needs absl, immutabledict, langdetect
     from instruction_following_eval import instructions_registry
@@ -233,17 +267,23 @@ def main():
     for i, (tag, path) in enumerate(adapters):
         validate_adapter_base(path, args.model)
         lora = None if path == "none" else LoRARequest(f"lora-{tag}", i + 1, str(Path(path)))
-        tag_dir = out_dir / tag
-        tag_dir.mkdir(parents=True, exist_ok=True)
-
         adapter_fingerprint = None if path == 'none' else fingerprint(path)
-        for recipe in recipes:
+        for generation_seed, recipe in product(seeds, recipes):
+            tag_dir = (out_dir / f'seed-{generation_seed}' / tag
+                       if args.seeds is not None else out_dir / tag)
+            tag_dir.mkdir(parents=True, exist_ok=True)
             rectag = f"t{recipe['temp']}_n{recipe['n']}"
             result_path = tag_dir / f"results_{rectag}.json"
             gen_path = tag_dir / f'generations_{rectag}.jsonl'
             manifest = tag_dir / f'manifest_{rectag}.json'
-            config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint,
+            eval_args = argparse.Namespace(**vars(args))
+            eval_args.seed = generation_seed
+            config = eval_config(eval_args, recipe, model_fingerprint, adapter_fingerprint,
                                  stop_ids, 'ifeval', support_summary)
+            config['policy'] = policies[i]
+            config['engine']['seed'] = engine_seed
+            config['scoring'] = {'protocol': 'official_seeded_v1', 'seed': args.scoring_seed,
+                                 'langdetect_seed': args.scoring_seed}
             if cache_matches(manifest, config, [result_path, gen_path]):
                 print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
@@ -251,11 +291,12 @@ def main():
                 llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
               enable_lora=True, max_lora_rank=64, max_loras=4,
               max_model_len=4096, max_num_seqs=64,
-              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed)
+              gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=engine_seed,
+              **policy_engine_kwargs(head))
             params = checked_sampling_params(SamplingParams,
                 temperature=recipe["temp"], top_p=recipe["top_p"],
                 top_k=recipe["top_k"],
-                n=recipe["n"], max_tokens=args.max_tokens, seed=args.seed,
+                n=recipe["n"], max_tokens=args.max_tokens, seed=generation_seed,
                 stop_token_ids=list(stop_ids), **support_kwargs)
             outputs = llm.generate(rendered, params, lora_request=lora)
             validate_outputs(outputs, len(data), recipe['n'])
@@ -263,12 +304,13 @@ def main():
             # sample-major: responses[s][i] = sample s for prompt i
             responses_by_sample = [[o.outputs[s].text for o in outputs] for s in range(n_actual)]
             tokens_by_prompt = [[len(o.outputs[s].token_ids) for s in range(n_actual)] for o in outputs]
-            print(f"[{tag}/{rectag}] generated {len(outputs)} prompts x {n_actual} samples "
+            print(f"[{tag}/seed-{generation_seed}/{rectag}] generated {len(outputs)} prompts x {n_actual} samples "
                   f"(top_p={recipe['top_p']}, top_k={recipe['top_k']})", flush=True)
 
             per_sample, details = [], []
             for s, responses in enumerate(responses_by_sample):
-                strict, loose = score_one_sample(inp_list, responses, evaluation_lib)
+                strict, loose = score_one_sample(inp_list, responses, evaluation_lib,
+                                                 scoring_seed=args.scoring_seed)
                 per_sample.append(aggregate(inp_list, strict, loose))
                 for inp, sr, lr in zip(inp_list, strict, loose):
                     details.append({"sample": s, "key": inp.key, "prompt": inp.prompt[:100],
@@ -282,7 +324,7 @@ def main():
             all_lengths = sorted(t for lengths in tokens_by_prompt for t in lengths)
             p95_len = all_lengths[min(len(all_lengths) - 1, int(0.95 * len(all_lengths)))]
             print(f"\n{'=' * 55}")
-            print(f"  IFEval [{tag} / {rectag}] — adapter: {path}")
+            print(f"  IFEval [{tag} / seed-{generation_seed} / {rectag}] — adapter: {path}")
             print(f"{'=' * 55}")
             for s, m in enumerate(per_sample):
                 print(f"  sample {s}: strict={m['prompt_strict']:.4f} loose={m['prompt_loose']:.4f}")
@@ -297,7 +339,8 @@ def main():
 
             atomic_text(result_path, json.dumps({
                 "adapter": str(path), "tag": tag,
-                "recipe": recipe, "seed": args.seed, "max_tokens": args.max_tokens,
+                "recipe": recipe, "seed": generation_seed, "max_tokens": args.max_tokens,
+                "scoring_seed": args.scoring_seed,
                 **mean_metrics,
                 "per_sample": per_sample,
                 "response_length_mean": mean_len, "response_length_p95": p95_len,
@@ -307,6 +350,10 @@ def main():
                 "key": inp.key, "prompt": inp.prompt,
                 "responses": [responses_by_sample[s][i] for s in range(n_actual)],
                 "response_tokens": tokens_by_prompt[i],
+                "finish_reason": [getattr(sample, 'finish_reason', None) for sample in outputs[i].outputs],
+                "stop_reason": [getattr(sample, 'stop_reason', None) for sample in outputs[i].outputs],
+                "last_token_id": [sample.token_ids[-1] if sample.token_ids else None
+                                  for sample in outputs[i].outputs],
             }) for i, inp in enumerate(inp_list)))
             commit_cache(manifest, config, [result_path, gen_path])
             print(f"  Saved to {result_path}", flush=True)

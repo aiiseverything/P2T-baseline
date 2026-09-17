@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vpo_rm.alignment import check_response_tokens
-from vpo_rm.rollout_selection import select_training_rollout
+from vpo_rm.rollout_selection import select_training_rollout, validate_rollout_logprobs
 
 
 class Tokenizer:
@@ -58,7 +58,7 @@ def answers_of(rollout):
 
 
 def prefixes_of(rollout):
-    ids, attention, positions, _, mask, _, _ = rollout
+    ids, attention, positions, _, mask, _, _ = rollout[:7]
     return [ids[i, :positions[i, mask[i]][0]][attention[i, :positions[i, mask[i]][0]].bool()].tolist()
             for i in range(ids.shape[0])]
 
@@ -197,3 +197,136 @@ def test_retry_must_keep_same_prompt_token_prefix():
     retry = sample([[8], [8]], [[1, 0], [2, 0]], ["stop", "stop"])
     with pytest.raises(ValueError, match="prefix"):
         select_training_rollout(Trainer(original, retry), ["bad"])
+
+
+@pytest.mark.parametrize('answer,reason', [
+    ([1, 2], 'stop'),
+    ([1, 0, 2, 0], 'stop'),
+    ([1, 2], 'length'),
+    ([1, 2, 1, 2, 0], 'length'),
+])
+def test_inconsistent_termination_is_rejected_before_selecting_or_retrying(answer, reason):
+    original = sample([[7], [7]], [answer, [2, 0]], [reason, 'stop'])
+    trainer = Trainer(original)
+    with pytest.raises(ValueError, match='stop|EOS|length|termination'):
+        select_training_rollout(trainer, ['bad'])
+    assert trainer.calls == [['bad']]
+
+
+def attach_logp(rollout, values):
+    logp = torch.full(rollout[3].shape, float('nan'))
+    for row, entries in zip(logp, values):
+        row[:len(entries)] = torch.tensor(entries)
+    return (*rollout, logp)
+
+
+def test_rollout_logp_tracks_each_response_through_retry_drop_and_repadding():
+    prefixes = [[7], [7], [8], [8], [7, 8], [7, 8]]
+    original = attach_logp(sample(prefixes,
+        [[1] * 5, [2] * 5, [1, 0], [2, 1, 0], [0], [3, 0]],
+        ['length', 'length', 'stop', 'stop', 'stop', 'stop'],
+        prompt_width=5, response_width=7),
+        [[-.1] * 5, [-.2] * 5, [-.31, -.32], [-.41, -.42, -.43], [-.5], [-.6, -.61]])
+    retry = attach_logp(sample(prefixes[:2] + prefixes[4:],
+        [[0], [3, 0], [2, 1, 2, 0], [1, 6]], ['stop'] * 4,
+        prompt_width=3, response_width=6),
+        [[-.7], [-.8, -.81], [-.91, -.92, -.93, -.94], [-1.01, -1.02]])
+    trainer = Trainer(original, retry)
+    trainer.cfg.rollout_importance_correction = True
+    # A global latest-rollout side channel must not override the original good group.
+    trainer.last_rollout_logp = torch.full_like(retry[7], -99.)
+    result, prompts, stats = select_training_rollout(trainer, ['drop', 'keep', 'replace'])
+    assert prompts == ['keep', 'replace']
+    assert trainer.calls == [['drop', 'keep', 'replace'], ['drop', 'replace']]
+    assert len(result) == 8 and result[7].shape == result[3].shape == (4, 4)
+    assert answers_of(result) == [[1, 0], [2, 1, 0], [2, 1, 2, 0], [1, 6]]
+    torch.testing.assert_close(result[7], torch.tensor([
+        [-.31, -.32, 0, 0], [-.41, -.42, -.43, 0],
+        [-.91, -.92, -.93, -.94], [-1.01, -1.02, 0, 0]]))
+    assert stats['skipped_groups'] == 1
+    check_response_tokens(*result[:5])
+
+
+def test_valid_eighth_field_returns_unmodified_and_ignores_padding_nan():
+    original = attach_logp(sample([[7], [7]], [[1, 0], [2, 1, 6]], ['stop', 'stop']),
+                           [[0., -.1], [-.2, -.3, -.4]])
+    trainer = Trainer(original)
+    trainer.cfg.rollout_importance_correction = True
+    result, _, _ = select_training_rollout(trainer, ['good'])
+    assert result is original
+    assert torch.isnan(result[7][0, 2])
+
+
+@pytest.mark.parametrize('corruption', ['missing', 'none', 'shape', 'integer', 'bool', 'complex',
+                                       'not_tensor', 'device', 'nan', 'inf', 'positive'])
+def test_rollout_logp_is_validated_before_bad_group_is_discarded(corruption):
+    original = attach_logp(sample([[7], [7]], [[0], [0]], ['stop', 'stop']), [[-.1], [-.2]])
+    values = list(original)
+    if corruption == 'missing':
+        values.pop()
+    elif corruption == 'none':
+        values[7] = None
+    elif corruption == 'shape':
+        values[7] = torch.zeros(2, 2)
+    elif corruption in ('integer', 'bool', 'complex'):
+        values[7] = values[7].to({'integer': torch.long, 'bool': torch.bool, 'complex': torch.complex64}[corruption])
+    elif corruption == 'not_tensor':
+        values[7] = [[-.1], [-.2]]
+    elif corruption == 'device':
+        values[7] = torch.empty((2, 1), device='meta')
+    else:
+        values[7][0, 0] = {'nan': float('nan'), 'inf': -float('inf'), 'positive': .01}[corruption]
+    trainer = Trainer(tuple(values))
+    trainer.cfg.rollout_importance_correction = True
+    with pytest.raises(ValueError, match='logp|probabilit'):
+        select_training_rollout(trainer, ['bad'])
+    assert trainer.calls == [['bad']]
+
+
+def test_retry_requires_its_own_logp_when_correction_is_enabled():
+    original = attach_logp(sample([[7], [7]], [[0], [0]], ['stop', 'stop']), [[-.1], [-.2]])
+    retry = sample([[7], [7]], [[1, 0], [2, 0]], ['stop', 'stop'])
+    trainer = Trainer(original, retry)
+    trainer.cfg.rollout_importance_correction = True
+    with pytest.raises(ValueError, match='logp|probabilit'):
+        select_training_rollout(trainer, ['retry'])
+    assert trainer.calls == [['retry'], ['retry']]
+
+
+def test_optional_none_logp_is_supported_without_correction():
+    original = (*sample([[7], [7]], [[0], [0]], ['stop', 'stop']), None)
+    retry = (*sample([[7], [7]], [[1, 0], [2, 0]], ['stop', 'stop']), None)
+    result, _, _ = select_training_rollout(Trainer(original, retry), ['retry'])
+    assert len(result) == 8 and result[7] is None
+
+
+def test_mixed_present_and_missing_logp_cannot_be_silently_repacked():
+    original = sample([[7], [7], [8], [8]], [[1, 0], [2, 0], [0], [0]], ['stop'] * 4)
+    retry = attach_logp(sample([[8], [8]], [[1, 0], [2, 0]], ['stop', 'stop']),
+                        [[-.1, -.2], [-.3, -.4]])
+    with pytest.raises(ValueError, match='logp|probabilit'):
+        select_training_rollout(Trainer(original, retry), ['keep', 'replace'])
+
+
+def test_public_validator_checks_provided_values_even_when_not_required():
+    original = sample([[7], [7]], [[1, 0], [2, 0]], ['stop', 'stop'])
+    assert validate_rollout_logprobs(original) is None
+    assert validate_rollout_logprobs((*original, None)) is None
+    with pytest.raises(ValueError, match='finite and nonpositive'):
+        validate_rollout_logprobs((*original, torch.ones_like(original[3], dtype=torch.float)))
+    provided = attach_logp(original, [[-.1, -.2], [-.3, -.4]])
+    assert validate_rollout_logprobs(provided) is provided[7]
+
+
+def test_repacking_promotes_logp_dtype_without_rounding_original_probabilities():
+    original = attach_logp(sample([[7], [7], [8], [8]],
+        [[1, 0], [2, 0], [0], [0]], ['stop'] * 4),
+        [[-.1, -.2], [-.3, -.4], [-.5], [-.6]])
+    original = (*original[:7], original[7].double())
+    original[7][0, 0] = -.1234567890123
+    retry = attach_logp(sample([[8], [8]], [[1, 0], [2, 0]], ['stop', 'stop']),
+                        [[-.7, -.8], [-.9, -1.]])
+    result, _, _ = select_training_rollout(Trainer(original, retry), ['keep', 'replace'])
+    assert result[7].dtype == torch.float64
+    assert result[7][0, 0] == original[7][0, 0]
+    torch.testing.assert_close(result[7][2:], retry[7].double())

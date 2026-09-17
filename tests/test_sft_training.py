@@ -117,3 +117,35 @@ def test_final_step_always_emits_metrics_and_monitor_events():
     assert step_is_due(step=157, total_steps=157, every=100)
     assert not step_is_due(step=156, total_steps=157, every=20)
     assert not step_is_due(step=156, total_steps=157, every=100)
+
+
+@pytest.mark.parametrize(("last_token", "expected_truncated"), [(3, 0.), (4, 0.), (7, 1.)])
+def test_monitor_stop_exactly_at_length_limit_is_not_truncated(last_token, expected_truncated):
+    from types import SimpleNamespace
+    import torch
+    from scripts.sft_init import _monitor_pass
+
+    class Tokenizer:
+        eos_token_id = 3
+        pad_token_id = 0
+
+        def get_vocab(self):
+            return {"<pad>": 0, "<eos>": 3, "<|im_end|>": 4, "body": 7}
+
+        def apply_chat_template(self, *args, **kwargs):
+            return "prompt"
+
+        def __call__(self, *args, **kwargs):
+            return SimpleNamespace(input_ids=torch.tensor([[7]]))
+
+        def decode(self, *args, **kwargs):
+            return "answer"
+
+    class Model(torch.nn.Module):
+        def generate(self, ids, **kwargs):
+            return torch.cat((ids, torch.tensor([[7, last_token]])), dim=1)
+
+    model = Model()
+    result = _monitor_pass(model, Tokenizer(), ["question"], "cpu", max_new=2)
+    assert result["truncated"] == expected_truncated
+    assert model.training

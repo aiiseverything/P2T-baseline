@@ -15,7 +15,9 @@ submit() { # name run-label run-path
     echo "SKIP $name: results already on disk"
     return
   fi
-  if rjob list 2>/dev/null | grep -q "showname=$name)"; then
+  local jobs
+  jobs="$(rjob list)" || return "$?"
+  if grep -Fq "showname=$name)" <<< "$jobs"; then
     echo "SKIP $name: rjob already exists"
     return
   fi

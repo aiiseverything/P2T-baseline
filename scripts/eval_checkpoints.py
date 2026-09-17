@@ -4,8 +4,10 @@
 Evaluates every vllm-adapters/step-* checkpoint of one or more training runs on
 the SAME 256 validation prompts (first 256 of the SHA256-ordered 2000-prompt
 validation split) so training progress is comparable across runs, checkpoints,
-and temperatures.  Generation runs on cuda:0 via in-process vLLM; scoring on
-cuda:1 with the Skywork RM using the trainer's exact chat-template prefixing.
+and temperatures. Also accepts a direct adapter directory or LABEL=none for
+the bare base model. Generation runs on cuda:0 via in-process vLLM; scoring on
+--rm-device (default cuda:1) using the full user/assistant reward chat template.
+On an H200, --rm-device cuda:0 shares the card with the 0.45-budget vLLM engine.
 
 Outputs:
   eval.jsonl   one row per (run, step, temp, prompt): score + response length
@@ -36,6 +38,7 @@ import torch
 from scripts.eval_artifacts import (atomic_text, fingerprint, file_hash, cache_matches,
                                     commit_cache, runtime_versions,
                                     validate_adapter_base, validate_outputs)
+from scripts.eval_policy import resolve_shared_policy, policy_engine_kwargs
 
 
 def load_validation_prompts(dataset_path: str, num_prompts: int) -> list[str]:
@@ -48,6 +51,16 @@ def load_validation_prompts(dataset_path: str, num_prompts: int) -> list[str]:
 
 
 def discover_adapters(run_dir: Path) -> list[tuple[int, Path]]:
+    if str(run_dir) == 'none':
+        return [(0, run_dir)]
+    if (run_dir / 'adapter_config.json').is_file():
+        if not any((run_dir / name).is_file() for name in
+                   ('adapter_model.safetensors', 'adapter_model.bin')):
+            raise FileNotFoundError(f'No adapter weights under {run_dir}')
+        step = 0
+        if run_dir.name.startswith(('checkpoint-', 'step-')):
+            step = int(run_dir.name.rsplit('-', 1)[1])
+        return [(step, run_dir)]
     root = run_dir / "vllm-adapters"
     if not root.is_dir():
         raise FileNotFoundError(f"no vllm-adapters/ under {run_dir}")
@@ -101,19 +114,24 @@ def validate_temperature(temperature: float) -> float:
 
 def generate_all(runs, rendered, temps, args):
     """In-process vLLM: one pass over (run, step, temp); returns token-id lists."""
+    head, _ = resolve_shared_policy(
+        [adapter for _, run_dir in runs for _, adapter in discover_adapters(run_dir)],
+        getattr(args, 'policy_head_dtype', 'auto'))
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from vpo_rm.integration import checked_sampling_params, vllm_support_kwargs
     llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
               enable_lora=True, max_lora_rank=64, max_loras=1,
               max_model_len=4096, max_num_seqs=args.max_num_seqs,
-              gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed)
+              gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed,
+              **policy_engine_kwargs(head))
     from transformers import AutoConfig, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
     params = {t: checked_sampling_params(SamplingParams, temperature=validate_temperature(t),
                                 top_p=1.0 if t == 0 else _top_p(),
+                                top_k=-1, n=1,
                                 max_tokens=args.max_tokens, seed=args.seed,
                                 min_tokens=getattr(args, 'min_tokens', 0), stop_token_ids=_stop_ids(args.model),
                                 **support_kwargs,
@@ -125,7 +143,8 @@ def generate_all(runs, rendered, temps, args):
         for step, adapter in discover_adapters(run_dir):
             validate_adapter_base(adapter, args.model)
             adapter_id += 1
-            lora = LoRARequest(f"{label}-step-{step}", adapter_id, str(adapter))
+            lora = (None if str(adapter) == 'none' else
+                    LoRARequest(f"{label}-step-{step}", adapter_id, str(adapter)))
             for t in temps:
                 t0 = time.monotonic()
                 outs = llm.generate(rendered, params[t], lora_request=lora)
@@ -142,30 +161,38 @@ def generate_all(runs, rendered, temps, args):
     return generations
 
 
+def reward_rows(actor_tokenizer, reward_tokenizer, prompts, responses):
+    """Serialize decoded completions through the shared canonical RM protocol."""
+    if len(prompts) != len(responses):
+        raise ValueError("RM responses must cover all prompts exactly once")
+    from vpo_rm.reward_inputs import canonical_reward_input
+    return [canonical_reward_input(reward_tokenizer, str(prompt),
+                actor_tokenizer.decode(response, skip_special_tokens=True,
+                                       clean_up_tokenization_spaces=False))
+            for prompt, response in zip(prompts, responses)]
+
+
 def score_all(generations, prompts, temps, args):
-    """Skywork RM scoring on cuda:1 with the trainer's prefix format."""
+    """Unshaped Skywork RM scores with canonical complete conversations."""
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
     from vpo_rm.reward import LastTokenReward
-    from vpo_rm.trainer import VPOTrainer
+    device = getattr(args, 'rm_device', 'cuda:1')
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info(device)
+        print(f'RM loading on {device}: free={free / 2**30:.1f} GiB '
+              f'total={total / 2**30:.1f} GiB', flush=True)
     rtok = AutoTokenizer.from_pretrained(args.rm, padding_side="right", trust_remote_code=True)
     atok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    if atok.get_vocab() != rtok.get_vocab():
-        raise ValueError("Actor and reward model token-to-ID mappings differ")
     if rtok.pad_token_id is None:
         rtok.pad_token = rtok.eos_token
     rm_base = AutoModelForSequenceClassification.from_pretrained(
-        args.rm, torch_dtype=torch.bfloat16, trust_remote_code=True).to("cuda:1").eval()
+        args.rm, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device).eval()
     backbone = getattr(rm_base, "base_model", None) or getattr(rm_base, "model", None)
-    reward = LastTokenReward(backbone, rm_base.score).to("cuda:1").eval()
-    prefixes = [VPOTrainer._render_chat_prompt(rtok, str(p), tokenize=True) for p in prompts]
-    if prefixes and hasattr(prefixes[0], "input_ids"):
-        prefixes = [p.input_ids for p in prefixes]
-    prefixes = [list(map(int, p)) for p in prefixes]
-
+    reward = LastTokenReward(backbone, rm_base.score).to(device).eval()
     scores = {}
     with torch.no_grad():
         for (label, step, t), responses in sorted(generations.items()):
-            rows = [prefix + resp for prefix, resp in zip(prefixes, responses)]
+            rows = reward_rows(atok, rtok, prompts, responses)
             order = sorted(range(len(rows)), key=lambda i: len(rows[i]))
             vals = [0.0] * len(rows)
             micro = args.rm_microbatch
@@ -177,13 +204,25 @@ def score_all(generations, prompts, temps, args):
                 for j, i in enumerate(idx):
                     ids[j, :len(rows[i])] = torch.tensor(rows[i], dtype=torch.long)
                     mask[j, :len(rows[i])] = 1
-                out = reward(inputs_embeds=reward.get_input_embeddings()(ids.to("cuda:1")),
-                             attention_mask=mask.to("cuda:1"))
+                out = reward(inputs_embeds=reward.get_input_embeddings()(ids.to(device)),
+                             attention_mask=mask.to(device))
+                if out.shape != (len(idx),) or not torch.isfinite(out).all():
+                    raise ValueError('RM must return finite scalar scores for every response')
                 for j, i in enumerate(idx):
                     vals[i] = float(out[j])
             scores[(label, step, t)] = vals
             print(f"rm  {label} step={step} temp={t}: mean={statistics.mean(vals):.3f}", flush=True)
     return scores
+
+
+def validate_scores(generations, scores, num_prompts):
+    if not generations or set(generations) != set(scores):
+        raise ValueError('RM scores must cover every generated policy/temperature')
+    for key, values in scores.items():
+        if len(values) != num_prompts or len(generations[key]) != num_prompts:
+            raise ValueError('Incomplete per-prompt reward coverage')
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError('RM scores must be finite')
 
 
 def bootstrap_ci(values, n_boot=2000, ci=0.95, seed=0):
@@ -197,7 +236,8 @@ def bootstrap_ci(values, n_boot=2000, ci=0.95, seed=0):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--run", action="append", required=True, metavar="LABEL=PATH")
+    p.add_argument("--run", action="append", required=True, metavar="LABEL=PATH",
+                   help='Training run, direct adapter directory, or LABEL=none for Base')
     p.add_argument("--model", default="models/Qwen3-14B-Base")
     p.add_argument("--rm", default="models/Skywork-Reward-V2-Qwen3-8B")
     p.add_argument("--dataset-path",
@@ -208,20 +248,28 @@ def main():
     p.add_argument("--min-tokens", type=int, default=0)
     p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--rm-microbatch", type=int, default=8)
+    p.add_argument('--rm-device', choices=('cuda:0', 'cuda:1'), default='cuda:1')
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument('--policy-head-dtype', choices=('auto', 'native', 'float32'), default='auto',
+                   help='Actor head precision; auto follows manifests, or native for legacy adapters')
     p.add_argument("--output", required=True)
     args = p.parse_args()
     try:
         args.temps = [validate_temperature(t) for t in args.temps]
     except ValueError as error:
         p.error(str(error))
-    if torch.cuda.device_count() < 2:
-        raise RuntimeError("eval needs two GPUs: cuda:0 generation, cuda:1 RM")
+    required_gpus = 1 if args.rm_device == 'cuda:0' else 2
+    if torch.cuda.device_count() < required_gpus:
+        raise RuntimeError(f'eval needs {required_gpus} GPUs with RM on {args.rm_device}')
+    if min(args.num_prompts, args.max_tokens, args.max_num_seqs, args.rm_microbatch) < 1:
+        p.error('Prompt count, token budget, sequence count and microbatch must be positive')
     runs = []
     for spec in args.run:
+        if '=' not in spec:
+            p.error('Expected --run LABEL=PATH')
         label, path = spec.split("=", 1)
-        if not label or any(old == label for old, _ in runs):
-            p.error("run labels must be nonempty and unique")
+        if not label or not path or any(old == label for old, _ in runs):
+            p.error("run labels and paths must be nonempty, with unique labels")
         runs.append((label, Path(path)))
 
     from vpo_rm.trainer import VPOTrainer
@@ -240,17 +288,29 @@ def main():
         raise ValueError('No adapter checkpoints discovered')
     for _, _, adapter in checkpoints:
         validate_adapter_base(adapter, args.model)
+    head, policies = resolve_shared_policy([adapter for _, _, adapter in checkpoints], args.policy_head_dtype)
     config = {'args': vars(args), 'top_p': _top_p(), 'presence_penalty': _presence_penalty(),
               'model': fingerprint(args.model, full_weights=False),
               'rm': fingerprint(args.rm, full_weights=False), 'dataset': fingerprint(args.dataset_path),
-              'adapters': {f'{label}/{step}': fingerprint(adapter) for label, step, adapter in checkpoints},
+              'adapters': {f'{label}/{step}': None if str(adapter) == 'none' else fingerprint(adapter)
+                           for label, step, adapter in checkpoints},
               'prompts': prompts, 'source_sha256': file_hash(__file__),
               'eval_artifacts_sha256': file_hash(ROOT / 'scripts/eval_artifacts.py'),
               'trainer_sha256': file_hash(ROOT / 'vpo_rm/trainer.py'),
               'token_policy_sha256': file_hash(ROOT / 'vpo_rm/token_policy.py'),
               'integration_sha256': file_hash(ROOT / 'vpo_rm/integration.py'),
               'alignment_sha256': file_hash(ROOT / 'vpo_rm/alignment.py'),
+              'reward_inputs_sha256': file_hash(ROOT / 'vpo_rm/reward_inputs.py'),
+              'reward_sha256': file_hash(ROOT / 'vpo_rm/reward.py'),
+              'eval_policy_sha256': file_hash(ROOT / 'scripts/eval_policy.py'),
+              'model_identity_sha256': file_hash(ROOT / 'vpo_rm/model_identity.py'),
+              'reward_input_protocol': 'canonical_chat_v1',
+              'reward_metric': 'raw_skywork_scalar_no_length_or_kl_penalty',
+              'top_k': -1, 'samples_per_prompt': 1,
               'runtime_versions': runtime_versions()}
+    config['policy_head_dtype'] = head
+    config['policies'] = {f'{label}/{step}': policy
+                          for (label, step, _), policy in zip(checkpoints, policies)}
     config['output_support'] = support_summary
     files = [out / name for name in ('eval_prompts.json', 'eval.jsonl', 'summary.json', 'generations.jsonl')]
     manifest = out / 'manifest.json'
@@ -262,6 +322,7 @@ def main():
 
     generations = generate_all(runs, rendered, args.temps, args)
     scores = score_all(generations, prompts, args.temps, args)
+    validate_scores(generations, scores, len(prompts))
 
     eval_rows, generation_rows = [], []
     for (label, step, t), vals in sorted(scores.items()):
@@ -279,6 +340,8 @@ def main():
         summary.setdefault(label, {}).setdefault(str(step), {})[str(t)] = {
             "mean": statistics.mean(vals), "ci95": [lo, hi],
             "mean_response_tokens": statistics.mean(map(len, toks)),
+            "at_token_cap_rate": sum(len(ids) >= args.max_tokens for ids in toks) / len(toks),
+            "reward_metric": "raw_skywork_scalar_no_length_or_kl_penalty",
             "n": len(vals)}
     atomic_text(out / "summary.json", json.dumps(summary, indent=2, sort_keys=True))
     commit_cache(manifest, config, files)

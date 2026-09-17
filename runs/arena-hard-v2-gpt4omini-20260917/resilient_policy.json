@@ -1,0 +1,67 @@
+{
+  "policy": "arena_bounded_connection_recovery_v1",
+  "declared_at": "2026-09-17T13:40:45.225526+00:00",
+  "max_total_attempts_per_game": 5,
+  "transport_max_connect_attempts": 4,
+  "allowed_transport_errors": [
+    "ConnectError",
+    "ConnectTimeout"
+  ],
+  "original_experiment_sha256": "dd918da1595b964f38a1c177c12cc956a927249b1fcf77a0d30f607a1a30dd05",
+  "original_host_execution_sha256": "d5d0ccb6208f57085eeecc2c8485cd06f31c3edd6e17a20e2cb2be8877b10e1c",
+  "source_sha256": {
+    "continue_resilient.py": "b946b7f44b5d5ecae49c1e11e5243e725fd2c603257da79c3dd58ca07cb5ad03",
+    "retry_resilient_judgments.py": "487a418bb92b14aa5405737e0e8ed33babcb144a47088ea25993b5981efd84db",
+    "resilient_judge.py": "fc23e6393da9316350576c49c1d84636a52baf5c5249949f36c47d4b00fb81a1",
+    "verify_resilient_scoring.py": "bdb465a76c2b27f1fd8e0ef4bcb4080e03740133cfb9094afa365cbdd73b2a83",
+    "launch_resilient.py": "1e7f0312a6d4273691c75ccc0bd6dd8344fa2d01773df3071d082e8aec9da428",
+    "continue_evaluation.py": "b58349cb8af8739bdda1642b386a359775caadc9f7f965d59a50e66c9165217d",
+    "manual_transport_recovery.py": "9ab2cfedca77126ddde6fc0171c8f83f95161e40a1ea6674a746ecf084c5a054",
+    "resume_manual_recovery.py": "1a6b40e5dc70839d16eb0c397e0bc32b7e523f8baa13e1f1cbab7a29c876e21e",
+    "verify_manual_recovery.py": "e4097bc468575cc356331e66c058b23462b8d08598d06a5a54a0946c7613210c",
+    "verify_final_scoring.py": "9012405ddf5f7e9fbd9b92cd42adf899e11cbe71cbcf5bb2a3ada649cb9df951",
+    "source/scripts/judge_arena_hard.py": "aa0bbddb99d408e3d81156f63b8299381ed592a5f1abe2e252380ccb298d501f",
+    "source/scripts/score_arena_hard.py": "9b3f1e0e780f4467e668c63f5f0da9bc8afb39c1ff0e0e20bae2e8dd966ba16d"
+  },
+  "preserved_valid_records_sha256": {
+    "model_judgment/gpt-4.1/state/games/base/160e7f5bbfe84ce0-0.json": "0b140e4d78c980e40b6bd629c3f89f0ecaa8c2281b2431427a08bf42fda16d09",
+    "model_judgment/gpt-4.1/state/games/base/160e7f5bbfe84ce0-1.json": "5dc1d408ad54e26c4ed558706b2f53296a80cb5a3bdf5e10a38f66e3840f0b83",
+    "model_judgment/gpt-4.1/state/games/base/1f79640ff1a94b6a-0.json": "60f3b24622a37e8913086bf2d4ede7280fbede8f2568d000a44c6e48073aab67",
+    "model_judgment/gpt-4.1/state/games/base/1f79640ff1a94b6a-1.json": "bf719eec1b3035b1792cb67c384ce8c34f3e12d77ca4f5d11838ab05c4124691",
+    "model_judgment/gpt-4.1/state/games/grpo/160e7f5bbfe84ce0-0.json": "3c833a43ad1767d8123fa6f77c941c2c323ac026973e76af7191ee3b930b3993",
+    "model_judgment/gpt-4.1/state/games/grpo/160e7f5bbfe84ce0-1.json": "cc06d79ccb2a0c61643170b884194a28cca2c51b46221f16860ad39029630326",
+    "model_judgment/gpt-4.1/state/games/grpo/1f79640ff1a94b6a-0.json": "c511dd2ec2de40ac90cb0a5730b514799362e3e9e2d479c8d4cb5a231876334c",
+    "model_judgment/gpt-4.1/state/games/grpo/1f79640ff1a94b6a-1.json": "cff23ca840293cf3a228445dd94b045331d4b3b1c525835757a38eda098f2536",
+    "model_judgment/gpt-4.1/state/games/lam2/160e7f5bbfe84ce0-0.json": "f66e051978ad8e571b584737270e96302fdb65086b7be31c915e1a0b6d5aa360",
+    "model_judgment/gpt-4.1/state/games/lam2/160e7f5bbfe84ce0-1.json": "3618c0bdc2d529c58d248535f38781b3817b6620bf5047da7f4849ee9496744e",
+    "model_judgment/gpt-4.1/state/games/lam2/1f79640ff1a94b6a-0.json": "5b236c06559b67cc1965603473abbf1453b856432b215aedf5a5c0f283147ac5",
+    "model_judgment/gpt-4.1/state/games/lam2/1f79640ff1a94b6a-1.json": "b373f9a918aa691f5da655ea7f0e0e5f74ec60bb54758093b5fa7843eb41610d",
+    "model_judgment/gpt-4.1/state/games/lam4/160e7f5bbfe84ce0-0.json": "56e4f9943c59af3a2f41386c8156b3687ed70bb3a59741345ed06e41253ed96f",
+    "model_judgment/gpt-4.1/state/games/lam4/160e7f5bbfe84ce0-1.json": "bfb20cd48983a6ea8df505e3194a6efa06db2b436975c425e459c3aff6c4564c",
+    "model_judgment/gpt-4.1/state/games/lam4/1f79640ff1a94b6a-1.json": "6e6ad1826038f24e3c5bd78ceeef26193710235953454435577f94dbdaf11649",
+    "model_judgment/gpt-4.1/state/games/lam8/160e7f5bbfe84ce0-0.json": "6f608907af3171ffc529e1f1c1587be8ad42ab41e6ab11ef958f1429305999fb",
+    "model_judgment/gpt-4.1/state/games/lam8/160e7f5bbfe84ce0-1.json": "384e299f2c1691de4a5c711d3ee6b25e6dcc77495727cd0774dbe7bd2476c5da",
+    "model_judgment/gpt-4.1/state/games/lam8/1f79640ff1a94b6a-0.json": "8833a53bb9e505c5bbbf888a7eee854d728598ca0168178c5d7a3e92e64847fd",
+    "model_judgment/gpt-4.1/state/games/lam8/1f79640ff1a94b6a-1.json": "ae44db363f0381eb41abe44c08dda31dc8d74a30944bb53040192054c9ec9f53",
+    "model_judgment/gpt-4.1/state/games/sft-init/160e7f5bbfe84ce0-0.json": "18688b82b132357e48c1ce5727b0398fefda0b14f191b297698c523ac58d0ca0",
+    "model_judgment/gpt-4.1/state/games/sft-init/160e7f5bbfe84ce0-1.json": "8dab32a6f93c6a48070374954491af27ff097bf16ff022d2a0837d957bbd163a",
+    "model_judgment/gpt-4.1/state/games/sft-init/1f79640ff1a94b6a-1.json": "ff82864c59c4af28923345e41cc90bde818042368164b13d86eb69fb64812688"
+  },
+  "reviewed_existing_failures": {
+    "lam4:1f79640ff1a94b6a:0": {
+      "path": "model_judgment/gpt-4.1/state/games/lam4/1f79640ff1a94b6a-0.json",
+      "sha256": "16170ec173a007db178b175506eb896e06b791005819007b0da279e881b1ee63"
+    },
+    "sft-init:1f79640ff1a94b6a:0": {
+      "path": "model_judgment/gpt-4.1/state/games/sft-init/1f79640ff1a94b6a-0.json",
+      "sha256": "37644765244d21b31eef11f40040f8a44021c4c3239c52404b5e681b9a9abf59"
+    }
+  },
+  "billing_origin": {
+    "start_date": "2026-09-01",
+    "usage0_cny": 100.477626
+  },
+  "legacy_manual_approval_sha256": "650d07599df3fb108b789eb4e6d0878ed26c33a34b78062ce6722f8a17d27060",
+  "proxy": "http://127.0.0.1:17891",
+  "review": "User explicitly requested continuation and confirmed17891. Preserve all valid judgments; bounded pre-request connection recovery; unchanged prompts, protocol, and scorer."
+}

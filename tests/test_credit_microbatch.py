@@ -7,23 +7,13 @@ import torch
 import vpo_rm.trainer as trainer_module
 from vpo_rm.reward import LastTokenReward
 from vpo_rm.trainer import TrainerConfig, VPOTrainer
+from bytelevel_fixtures import ByteLevelTestTokenizer
 
 
-class Tokenizer:
-    eos_token_id = pad_token_id = 0
-    bos_token_id = 1
-    all_special_ids = [0, 1, 6]
-
-    def get_vocab(self):
-        return {"<|endoftext|>": 0, "p": 1, "a": 2, "b": 3, "c": 4,
-                "d": 5, "<|im_end|>": 6, "\n": 7, " ": 8, "q": 9, "z": 10}
-
-    def decode(self, ids, **kwargs):
-        vocab = {v: k for k, v in self.get_vocab().items()}
-        return "".join(vocab[i] for i in ids)
-
-    def __call__(self, text, add_special_tokens=True):
-        return {"input_ids": [1, 9] if text == "p" else [9, 1, 9]}
+class Tokenizer(ByteLevelTestTokenizer):
+    def __init__(self):
+        super().__init__({"<|endoftext|>": 0, "p": 1, "a": 2, "b": 3, "c": 4,
+                          "d": 5, "<|im_end|>": 6, "\n": 7, " ": 8, "q": 9, "z": 10})
 
 
 def make_trainer(path, credit_microbatch, *, method="vpo_rm", dtype=torch.float32):

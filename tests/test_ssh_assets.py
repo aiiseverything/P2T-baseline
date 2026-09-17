@@ -151,3 +151,17 @@ def test_manifest_rejects_paths_outside_repository(tmp_path):
     manifest["assets"][0]["path"] = "../outside"
     with pytest.raises(ValueError, match="relative|outside"):
         assets.check_assets(root, manifest)
+
+
+@pytest.mark.parametrize('filename,content,asset_name', [
+    ('models/actor/model.safetensors.index.json', '{"weight_map":[]}', 'actor'),
+    ('models/init-adapter/adapter_config.json', '[]', 'init_adapter'),
+])
+def test_malformed_asset_json_is_reported_invalid_without_crashing(tmp_path, filename, content, asset_name):
+    root, manifest = fixture_manifest(tmp_path)
+    (root / filename).write_text(content)
+    report = assets.check_assets(root, manifest)
+    assert report['ok'] is False
+    row = next(item for item in report['assets'] if item['name'] == asset_name)
+    assert row['status'] == 'invalid'
+    assert any('invalid' in issue for issue in row['issues'])

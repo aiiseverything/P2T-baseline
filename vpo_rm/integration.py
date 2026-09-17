@@ -49,6 +49,7 @@ def vllm_sampling_kwargs(tokenizer, vocab_size: int, request: dict) -> dict:
             "max_tokens": maximum, "min_tokens": minimum,
             "n": 1 if probe else int(request.get("group_size", 8)),
             "stop_token_ids": list(get_stop_token_ids(tokenizer)),
+            **({"logprobs": 1} if request.get("return_logprobs", False) else {}),
             **vllm_support_kwargs(tokenizer, vocab_size)}
 
 
@@ -87,10 +88,13 @@ def sampling_summary(kwargs):
     return summary
 
 
-def generation_payload(generated, stop_token_ids) -> dict:
+def generation_payload(generated, stop_token_ids, *, include_logprobs=False) -> dict:
     """Keep engine termination metadata; an emitted final stop is complete at cap."""
     rows, reasons, engine_reasons, stop_reasons = [], [], [], []
+    selected_logprobs, prompt_token_ids = [], []
     for result in generated:
+        if include_logprobs:
+            prompt_token_ids.append(list(result.prompt_token_ids))
         for output in result.outputs:
             ids = list(output.token_ids)
             reason = output.finish_reason
@@ -100,9 +104,56 @@ def generation_payload(generated, stop_token_ids) -> dict:
             engine_reasons.append(reason)
             reasons.append("stop" if ids[-1] in stop_token_ids else reason)
             stop_reasons.append(output.stop_reason)
+            if include_logprobs:
+                probabilities = getattr(output, "logprobs", None)
+                if probabilities is None or len(probabilities) != len(ids):
+                    raise ValueError("Requested chosen-token logprobs are missing or misaligned")
+                values = []
+                for token, options in zip(ids, probabilities):
+                    selected = options.get(token)
+                    if selected is None or not math.isfinite(selected.logprob):
+                        raise ValueError("Requested chosen-token logprob is missing or nonfinite")
+                    values.append(float(selected.logprob))
+                selected_logprobs.append(values)
     return {"rows": rows, "finish_reasons": reasons,
             "engine_finish_reasons": engine_reasons, "stop_reasons": stop_reasons,
-            "tokens": sum(map(len, rows))}
+            "tokens": sum(map(len, rows)),
+            **({"selected_logprobs": selected_logprobs, "prompt_token_ids": prompt_token_ids}
+               if include_logprobs else {})}
+
+
+def validate_response_termination(responses: Tensor, response_mask: Tensor,
+                                  finish_reasons, stop_token_ids,
+                                  max_response_tokens: int) -> None:
+    """Require terminal EOS for stopped rows and a full cap for truncations.
+
+    Responses are right padded; padding may share the EOS token ID. An EOS
+    emitted exactly at the cap is complete and must be labelled ``stop``.
+    """
+    if responses.ndim != 2 or response_mask.shape != responses.shape:
+        raise ValueError("Response termination requires matching [B,T] tensors")
+    if not ((response_mask == 0) | (response_mask == 1)).all():
+        raise ValueError("Response termination requires a binary response mask")
+    if len(finish_reasons) != len(responses) or any(
+            reason not in {"stop", "length"} for reason in finish_reasons):
+        raise ValueError("Every response requires a stop or length finish reason")
+    valid = response_mask.bool()
+    lengths = valid.sum(-1)
+    if ((lengths < 1) | (lengths > max_response_tokens)).any():
+        raise ValueError("Invalid response termination length")
+    expected = torch.arange(responses.shape[1], device=responses.device)[None, :] < lengths[:, None]
+    if not torch.equal(valid, expected):
+        raise ValueError("Response termination requires right-padded response tokens")
+    stop_ids = torch.as_tensor(tuple(stop_token_ids), dtype=responses.dtype, device=responses.device)
+    stopped = torch.isin(responses, stop_ids) & valid
+    stop_count = stopped.sum(-1)
+    terminal_stop = stopped.gather(1, (lengths - 1)[:, None]).squeeze(1)
+    expects_stop = torch.tensor([reason == "stop" for reason in finish_reasons],
+                                device=responses.device)
+    consistent = torch.where(expects_stop, (stop_count == 1) & terminal_stop,
+                             (stop_count == 0) & (lengths == max_response_tokens))
+    if not consistent.all():
+        raise ValueError("Response termination stop/EOS or length metadata is inconsistent")
 
 
 @dataclass(frozen=True)
@@ -190,6 +241,7 @@ def build_credit_cache(old_logits: Tensor, token_ids: Tensor, input_grads: Tenso
                        stop_token_ids=None, structural_token_ids=None,
                        policy_temperature: float = 1.0,
                        min_response_tokens: int = 0,
+                       fixed_weight_mask: Tensor | None = None,
                        **chunk_sizes) -> RolloutCache:
     """Cache attribution and the probability protocol after group aggregation.
 
@@ -211,6 +263,7 @@ def build_credit_cache(old_logits: Tensor, token_ids: Tensor, input_grads: Tenso
                             freeze_structural=freeze_structural,
                             stop_token_ids=stop_token_ids,
                             structural_token_ids=structural_token_ids,
+                            fixed_weight_mask=fixed_weight_mask,
                             policy_temperature=policy_temperature, **chunk_sizes)
     # Token blocks avoid allocating an additional full [B,T,V] log-softmax.
     old_logp = torch.zeros_like(credit.direction)

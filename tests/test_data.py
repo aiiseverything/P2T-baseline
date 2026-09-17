@@ -63,3 +63,22 @@ def test_exclude_benchmark_prompts_rejects_unknown_row_schema(tmp_path):
     bad = _write_jsonl(tmp_path / "bad.jsonl", [{"text": "prompt"}])
     with pytest.raises(ValueError, match="prompt field"):
         exclude_benchmark_prompts(["prompt"], {"bad": bad})
+
+
+def test_benchmark_list_never_silently_drops_files_with_the_same_name(tmp_path):
+    first = tmp_path / "first" / "test.jsonl"
+    second = tmp_path / "second" / "test.jsonl"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    _write_jsonl(first, [{"prompt": "first benchmark"}])
+    _write_jsonl(second, [{"prompt": "second benchmark"}])
+
+    with pytest.raises(ValueError, match="duplicate benchmark name"):
+        exclude_benchmark_prompts(["first benchmark", "second benchmark"], [first, second])
+
+
+def test_empty_prompts_are_not_reported_as_duplicates():
+    filtered, metadata = exclude_benchmark_prompts(["", "  ", "kept", "kept"], {})
+    assert filtered == ["kept"]
+    assert metadata["duplicate_count"] == 1
+    assert metadata["empty_prompt_count"] == 2

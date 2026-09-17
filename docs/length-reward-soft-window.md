@@ -1,6 +1,6 @@
 # Soft response-length reward window
 
-The `soft` mode keeps generation free to stop naturally while discouraging two observed failures: very short outputs and long padding that consumes the 2,048-token generation limit. The existing `legacy` mode remains the default for old commands and run reproduction. This document describes the new configuration; no GPU training has been run to validate its outcome.
+The `soft` mode keeps generation free to stop naturally while discouraging two observed failures: very short outputs and long padding that consumes the 2,048-token generation limit. The existing `legacy` mode remains the default for old commands and run reproduction. The corrected GRPO and VPO λ=2/4/8 runs now use this configuration; see the [current experiment status](project-status-2026-09-17.md) for their protocols and evaluation results. Those results also include reward-input and sampling corrections, so they do not isolate the effect of the length reward alone.
 
 Let `L` be the number of **generated response tokens** in the response mask. It includes a generated EOS token when present, and excludes prompt tokens. Let `M` be `max_response_tokens`, `σ₀` the initial calibration scale, and `clip(x,0,1)` clamp to `[0,1]`. The soft reward deductions are
 

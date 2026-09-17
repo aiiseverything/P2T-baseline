@@ -14,6 +14,15 @@ def parse(*argv):
     return length_reward_config_kwargs(parser.parse_args(argv))
 
 
+@pytest.fixture
+def isolated_benchmarks(tmp_path, monkeypatch):
+    from vpo_rm import data
+
+    benchmark = tmp_path / "benchmark.jsonl"
+    benchmark.write_text(json.dumps({"instruction": "held-out benchmark prompt"}) + "\n")
+    monkeypatch.setattr(data, "DEFAULT_BENCHMARK_PATHS", {"synthetic": benchmark})
+
+
 def test_length_cli_defaults_preserve_legacy_and_defer_minimum_resolution():
     assert parse() == {
         "length_reward_mode": "legacy",
@@ -59,7 +68,7 @@ def test_length_cli_keeps_legacy_slope_and_anchor_options():
     assert values["length_penalty_anchor"] == 600
 
 
-def test_train_skywork_passes_init_adapter_and_soft_config_before_model_load(tmp_path):
+def test_train_skywork_passes_init_adapter_and_soft_config_before_model_load(tmp_path, isolated_benchmarks):
     from scripts import train_skywork
 
     prompts = tmp_path / "prompts.txt"
@@ -83,7 +92,7 @@ def test_train_skywork_passes_init_adapter_and_soft_config_before_model_load(tmp
     assert config.init_adapter == "models/sft-native-eos-clean2k5e2"
 
 
-def test_trainer_module_cli_forwards_soft_mode_and_init_adapter(tmp_path):
+def test_trainer_module_cli_forwards_soft_mode_and_init_adapter(tmp_path, isolated_benchmarks):
     from vpo_rm import trainer
 
     prompts = tmp_path / "prompts.txt"

@@ -27,11 +27,13 @@ from typing import Any, Iterable, Sequence
 import torch
 
 from .alignment import check_response_tokens, check_tokenizers, shared_output_mask
-from .core import Credit, grpo_policy_loss
+from .core import Credit, grpo_policy_loss, rollout_importance_weights
 from .integration import (RolloutCache, actor_response_logits, build_credit_cache,
                           response_reward_gradients, selected_logp_from_logits,
-                          sampling_logits)
+                          sampling_logits, validate_response_termination)
 from .reward import LastTokenReward
+from .model_identity import validate_adapter_base
+from .reward_inputs import build_reward_input, canonical_reward_input, REWARD_INPUT_PROTOCOL
 from .token_policy import get_stop_token_ids, get_structural_token_ids
 
 
@@ -66,8 +68,11 @@ def check_fresh_output(output_dir):
     path = Path(output_dir)
     markers = ("metrics.jsonl", "credit_stats.jsonl", "profile_manifest.json",
                "profile_metrics.jsonl", "vllm-adapters", "adapter_config.json",
-               "length_reward_calibration.json")
-    if path.is_file() or any((path / name).exists() for name in markers) or any(path.glob("checkpoint-*")):
+               "length_reward_calibration.json", "config.json", "tokenizer.json",
+               "tokenizer_config.json", "model.safetensors", "pytorch_model.bin")
+    if (path.is_file() or any((path / name).exists() for name in markers)
+            or any(path.glob("checkpoint-*")) or any(path.glob("*.index.json"))
+            or any(path.glob("*.safetensors")) or any(path.glob("*.bin"))):
         raise FileExistsError(f"Use a fresh output directory; existing training artifacts found: {path}")
 
 
@@ -87,6 +92,8 @@ class TrainerConfig:
     optimizer_minibatch_responses: int = 64
     microbatch_responses: int = 1
     credit_microbatch_responses: int = 0  # Zero preserves dense old-policy VPO credit.
+    rollout_importance_correction: bool = False  # Requires actual sampler log-probs.
+    policy_head_dtype: str = "native"
     generation_microbatch_responses: int = 1
     max_prompt_tokens: int = 2048
     max_response_tokens: int = 2048
@@ -135,6 +142,31 @@ class TrainerConfig:
 
     def resolved(self) -> "TrainerConfig":
         c = TrainerConfig(**asdict(self))
+        if type(c.rollout_importance_correction) is not bool:
+            raise ValueError("rollout_importance_correction must be boolean")
+        if c.policy_head_dtype not in {"native", "float32"}:
+            raise ValueError("policy_head_dtype must be native or float32")
+        for name in ("group_size", "prompts_per_rollout", "rollout_iterations",
+                     "policy_epochs_per_rollout", "optimizer_minibatch_responses",
+                     "microbatch_responses", "generation_microbatch_responses",
+                     "max_prompt_tokens", "max_response_tokens", "checkpoint_interval",
+                     "token_chunk_size", "vocab_chunk_size", "lora_r", "lora_alpha",
+                     "max_smoke_rollouts", "max_smoke_prompts", "max_smoke_group_size"):
+            value = getattr(c, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if type(c.validation_size) is not int or c.validation_size < 0:
+            raise ValueError("validation_size must be a nonnegative integer")
+        for name in ("learning_rate", "tau", "max_grad_norm"):
+            value = getattr(c, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name in ("weight_decay", "beta", "clip_eps", "length_penalty_slope", "degenerate_penalty"):
+            value = getattr(c, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not math.isfinite(c.credit_lambda) or c.credit_lambda < 1:
+            raise ValueError("credit_lambda must be finite and at least one")
         if c.length_reward_mode not in {"legacy", "soft"}:
             raise ValueError("length_reward_mode must be legacy or soft")
         if c.min_response_tokens is None:
@@ -204,6 +236,9 @@ class VPOTrainer:
         self.actor_device = torch.device(self.cfg.actor_device)
         self.reward_device = torch.device(self.cfg.reward_device)
         self.actor.to(self.actor_device)
+        if self.cfg.policy_head_dtype == "float32":
+            from .policy_precision import enable_fp32_output_head
+            enable_fp32_output_head(self.actor)
         self.reward.to(self.reward_device).eval()
         for p in self.reward.parameters():
             p.requires_grad_(False)
@@ -258,9 +293,11 @@ class VPOTrainer:
 
     @classmethod
     def from_pretrained(cls, config: TrainerConfig) -> "VPOTrainer":
-        from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
         c = config.resolved()
         check_fresh_output(c.output_dir)
+        if c.init_adapter:
+            validate_adapter_base(c.init_adapter, c.model_name)
+        from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
         # PEFT initializes random LoRA A weights before trainer.__init__ runs.
         random.seed(c.seed)
         torch.manual_seed(c.seed)
@@ -345,7 +382,7 @@ class VPOTrainer:
         for prompt in prompts:
             actor_text = self._render_chat_prompt(self.actor_tokenizer, prompt, tokenize=False)
             actor_ids = self.actor_tokenizer(actor_text, add_special_tokens=False)["input_ids"]
-            reward_ids = self._render_chat_prompt(self.reward_tokenizer, prompt, tokenize=True)
+            reward_ids = canonical_reward_input(self.reward_tokenizer, str(prompt), '')
             if len(actor_ids) <= self.cfg.max_prompt_tokens and len(reward_ids) <= self.cfg.max_prompt_tokens:
                 kept.append(prompt)
         self.filtered_prompt_count = len(prompts) - len(kept)
@@ -422,21 +459,33 @@ class VPOTrainer:
                 "temperature": self.cfg.temperature, "top_p": self.cfg.top_p,
                 "top_k": self.cfg.top_k, "min_tokens": self.cfg.min_response_tokens,
                 "presence_penalty": 0.0, "stop_token_ids": list(self.stop_token_ids),
+                "policy_head_dtype": self.cfg.policy_head_dtype,
+                "rollout_correction": ("detached_token_is_pg_and_kl_v1"
+                                       if self.cfg.rollout_importance_correction else "none"),
                 "support_sha256": hashlib.sha256(json.dumps(support).encode()).hexdigest()}
 
     def _reward_batch(self, input_ids, full_mask, positions, responses, rmask, prompts=None):
-        """Build Skywork-formatted RM inputs while preserving generated token IDs."""
+        """Score canonical RM chats; attribute only byte/token-identical positions."""
         if prompts is None:
             raise ValueError("prompts are required to apply the reward-model chat template")
-        rows, width = [], []
-        for prompt, response, valid in zip(prompts, responses, rmask):
-            prefix = self._render_chat_prompt(self.reward_tokenizer, str(prompt), tokenize=True)
-            if hasattr(prefix, "input_ids"):
-                prefix = prefix.input_ids
-            prefix = list(prefix)
+        if len(prompts) != len(responses) or responses.shape != rmask.shape:
+            raise ValueError("Reward prompts, responses and masks must align")
+        rows = []
+        mapped = torch.full_like(responses, -1, dtype=torch.long)
+        for index, (prompt, response, valid) in enumerate(zip(prompts, responses, rmask)):
             answer = response[valid].detach().cpu().tolist()
-            rows.append(prefix + answer)
-            width.append((len(prefix), len(answer)))
+            encoded = build_reward_input(self.actor_tokenizer, self.reward_tokenizer, str(prompt), answer)
+            rows.append(encoded.input_ids)
+            mapped[index, valid] = torch.tensor(encoded.response_positions, device=mapped.device)
+        self._reward_fixed_weight_mask = rmask & mapped.lt(0)
+        special_ids = torch.tensor(self.actor_tokenizer.all_special_ids, device=responses.device)
+        content_mask = rmask & ~torch.isin(responses, special_ids)
+        self._reward_alignment_stats = {
+            "rm_mapped_tokens": int((rmask & mapped.ge(0)).sum()),
+            "rm_unmapped_tokens": int(self._reward_fixed_weight_mask.sum()),
+            "rm_unmapped_content_tokens": int((content_mask & mapped.lt(0)).sum()),
+            "rm_unmapped_content_fraction": float((content_mask & mapped.lt(0)).sum() / content_mask.sum().clamp_min(1)),
+        }
         # The experiment's physical response microbatch is one.  In particular,
         # RM input gradients must be computed in chunks too; retaining the
         # backward graph for all 64 responses can exceed a 140GB H200.
@@ -450,17 +499,13 @@ class VPOTrainer:
             rid = torch.full((len(chunk_rows), max_len), pad, dtype=torch.long,
                              device=self.reward_device)
             rmask_full = torch.zeros_like(rid, dtype=torch.long)
-            rpos = torch.full((len(chunk_rows), responses.shape[1]), -1,
-                              dtype=torch.long, device=self.reward_device)
+            rpos = mapped[chunk_start:chunk_end].to(self.reward_device)
             for j, row in enumerate(chunk_rows):
                 rid[j, :len(row)] = torch.tensor(row, dtype=torch.long,
                                                  device=self.reward_device)
                 rmask_full[j, :len(row)] = 1
-                start, length = width[chunk_start + j]
-                rpos[j, :length] = torch.arange(start, start + length,
-                                                device=self.reward_device)
             toks = responses[chunk_start:chunk_end].to(self.reward_device)
-            valid = rmask[chunk_start:chunk_end].to(self.reward_device)
+            valid = rmask[chunk_start:chunk_end].to(self.reward_device) & rpos.ge(0)
             if self.cfg.method == "grpo":
                 # GRPO uses only sequence rewards.  Avoid constructing the input
                 # gradient graph (which is the expensive VPO-RM operation).
@@ -565,6 +610,7 @@ class VPOTrainer:
         credit_seconds = finish_phase(start)
         actor_seconds = 0.
         caches, entropies = [], []
+        fixed = getattr(self, "_reward_fixed_weight_mask", torch.zeros_like(response_mask))
         micro = self.cfg.credit_microbatch_responses
         for lo in range(0, responses.shape[0], micro):
             sl = slice(lo, lo + micro)
@@ -584,6 +630,7 @@ class VPOTrainer:
                 freeze_structural=self.cfg.freeze_structural,
                 stop_token_ids=self.stop_token_ids,
                 structural_token_ids=self.structural_token_ids,
+                fixed_weight_mask=fixed[sl].to(self.actor_device),
                 policy_temperature=self.cfg.temperature,
                 min_response_tokens=self.cfg.min_response_tokens,
                 token_chunk_size=self.cfg.token_chunk_size,
@@ -610,7 +657,7 @@ class VPOTrainer:
         stop = set(self.stop_token_ids)
         texts = [self.actor_tokenizer.decode(
             [x for x in row[valid].detach().cpu().tolist() if x not in stop],
-            skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            skip_special_tokens=True, clean_up_tokenization_spaces=False)
             for row, valid in zip(responses, rmask)]
         empty, repeated = response_degeneracy(texts, self.cfg.degenerate_newline_run)
         return (torch.tensor(empty, device=self.reward_device, dtype=torch.bool),
@@ -639,7 +686,7 @@ class VPOTrainer:
                   "seed": self.cfg.seed, "model": self.cfg.model_name,
                   "init_adapter": self.cfg.init_adapter, "reward_model": self.cfg.reward_model_name,
                   "sampling": self.sampling_manifest(),
-                  "reward_format": "reward_chat_generation_prefix_plus_exact_response_tokens_v1",
+                  "reward_format": REWARD_INPUT_PROTOCOL,
                   "length_counting": "generated tokens including EOS, excluding prompt and padding",
                   "rng_policy": "calibration consumes sampler RNG before training",
                   "short_response_threshold": self.cfg.short_response_threshold,
@@ -663,7 +710,7 @@ class VPOTrainer:
                 for start in range(0, count, self.cfg.prompts_per_rollout):
                     batch_prompts = chosen[start:start + self.cfg.prompts_per_rollout]
                     rollout = self.rollout(batch_prompts)
-                    ids, mask, positions, responses, rmask, _, reasons = rollout
+                    ids, mask, positions, responses, rmask, _, reasons = rollout[:7]
                     self._validate_rollout(rollout, len(batch_prompts))
                     rewards, *_ = self._reward_batch(ids, mask, positions, responses, rmask,
                         [p for p in batch_prompts for _ in range(self.cfg.group_size)])
@@ -689,7 +736,9 @@ class VPOTrainer:
         return record
 
     def _validate_rollout(self, rollout, prompt_count):
-        ids, mask, positions, responses, rmask, rendered, reasons = rollout
+        from .rollout_selection import validate_rollout_logprobs
+        validate_rollout_logprobs(rollout, required=self.cfg.rollout_importance_correction)
+        ids, mask, positions, responses, rmask, rendered, reasons = rollout[:7]
         expected = prompt_count * self.cfg.group_size
         if len(responses) != expected or len(rendered) != expected or len(reasons) != expected:
             raise ValueError("Rollout must contain complete prompt groups")
@@ -698,6 +747,8 @@ class VPOTrainer:
         lengths = rmask.sum(-1)
         if bool(((lengths < 1) | (lengths > self.cfg.max_response_tokens)).any()):
             raise ValueError("Invalid response length")
+        validate_response_termination(responses, rmask, reasons, self.stop_token_ids,
+                                      self.cfg.max_response_tokens)
         check_response_tokens(ids, mask, positions, responses, rmask)
         valid_ids = responses[rmask]
         if ((valid_ids < 0) | (valid_ids >= self.output_mask.numel())).any() or not self.output_mask[valid_ids].all():
@@ -754,7 +805,8 @@ class VPOTrainer:
             if self.rollout_index % self.cfg.checkpoint_interval == 0:
                 self.save_checkpoint(self.rollout_index)
             return metrics
-        input_ids, full_mask, positions, responses, rmask, rendered, finish_reasons = rollout
+        input_ids, full_mask, positions, responses, rmask, rendered, finish_reasons = rollout[:7]
+        self._validate_rollout(rollout, len(prompts))
         if len(finish_reasons) != responses.shape[0] or any(x not in {"stop", "length"} for x in finish_reasons):
             raise ValueError("Every response requires an explicit stop or length finish reason")
         valid_ids = responses[rmask]
@@ -856,6 +908,7 @@ class VPOTrainer:
                                            freeze_structural=self.cfg.freeze_structural,
                                            stop_token_ids=self.stop_token_ids,
                                            structural_token_ids=self.structural_token_ids,
+                                           fixed_weight_mask=getattr(self, "_reward_fixed_weight_mask", torch.zeros_like(rmask)).to(self.actor_device),
                                            policy_temperature=self.cfg.temperature,
                                            min_response_tokens=self.cfg.min_response_tokens,
                                            token_chunk_size=self.cfg.token_chunk_size,
@@ -903,6 +956,30 @@ class VPOTrainer:
             raise ValueError("Sampled tokens must have finite probability in the sampling support")
         if ref_logp is not None and not torch.isfinite(ref_logp[rmask]).all():
             raise ValueError("Initial reference log probabilities must be finite on sampled support")
+        importance = None
+        probability_metrics = {}
+        if self.cfg.rollout_importance_correction:
+            rollout_logp = rollout[7]
+            importance = rollout_importance_weights(cache.old_logp, rollout_logp, rmask)
+            values = importance[rmask].double()
+            errors = (cache.old_logp.detach() - rollout_logp.detach())[rmask].double().abs()
+            quantiles = values.quantile(torch.tensor([.01, .5, .99], device=values.device,
+                                                      dtype=values.dtype))
+            probability_metrics = {
+                "rollout_is_min": float(values.min()), "rollout_is_mean": float(values.mean()),
+                "rollout_is_p01": float(quantiles[0]), "rollout_is_p50": float(quantiles[1]),
+                "rollout_is_p99": float(quantiles[2]), "rollout_is_max": float(values.max()),
+                "rollout_is_ess_ratio": float(values.sum().square() / (values.numel() * values.square().sum())),
+                "rollout_logp_abs_error_mean": float(errors.mean()),
+                "rollout_logp_abs_error_p99": float(errors.quantile(.99)),
+                "rollout_logp_abs_error_max": float(errors.max()),
+                "rollout_direct_ratio_clip_fraction": float(((values < 1 - self.cfg.clip_eps)
+                                                            | (values > 1 + self.cfg.clip_eps)).double().mean())}
+            torch.save({"old_logp": cache.old_logp.detach().masked_fill(~rmask, 0).cpu(),
+                        "rollout_logp": rollout_logp.detach().masked_fill(~rmask, 0).cpu(),
+                        "importance_weights": importance.cpu(), "response_mask": rmask.cpu()},
+                       Path(self.cfg.output_dir) / f"rollout-{self.rollout_index + 1}-probabilities.pt")
+        initial_hf_deltas = []
         for _epoch in range(self.cfg.policy_epochs_per_rollout):
             for batch_start in range(0, B, minibatch):
                 batch_end = min(B, batch_start + minibatch)
@@ -916,14 +993,19 @@ class VPOTrainer:
                     new_logits = self._sampling_logits(new_logits)
                     new_logp = selected_logp_from_logits(new_logits, responses[sl], rmask[sl],
                                                          policy_temperature=self.cfg.temperature)
+                    if _epoch == 0 and optimizer_steps == 0:
+                        initial_hf_deltas.append((new_logp.detach() - cache.old_logp[sl])[rmask[sl]].cpu())
                     chunk_loss = grpo_policy_loss(new_logp, cache.old_logp[sl],
                                                   cache.credit.advantage[sl], rmask[sl],
-                                                  self.cfg.clip_eps)
+                                                  self.cfg.clip_eps,
+                                                  importance_weights=None if importance is None else importance[sl])
                     if self.cfg.beta:
                         base_logp = ref_logp[sl] if ref_logp is not None else cache.old_logp[sl]
                         delta = (base_logp.masked_fill(~rmask[sl], 0)
                                  - new_logp.masked_fill(~rmask[sl], 0))
                         kl = torch.expm1(delta) - delta
+                        if importance is not None:
+                            kl = kl * importance[sl]
                         chunk_loss = chunk_loss + self.cfg.beta * (kl.sum(-1) / rmask[sl].sum(-1)).mean()
                     if not torch.isfinite(chunk_loss):
                         self.optimizer.zero_grad(set_to_none=True)
@@ -949,7 +1031,10 @@ class VPOTrainer:
         reference_kl = 0.0
         if ref_logp is not None:
             delta = (ref_logp - cache.old_logp).masked_fill(~rmask, 0)
-            reference_kl = float((torch.expm1(delta) - delta).sum() / rmask.sum())
+            kl_values = torch.expm1(delta) - delta
+            if importance is not None:
+                kl_values = kl_values * importance
+            reference_kl = float(kl_values.sum() / rmask.sum())
         metrics = {"rollout": self.rollout_index, "loss": loss_value,
                    "skipped_rollout": False, "reward_count": B,
                    "optimizer_steps": optimizer_steps,
@@ -971,6 +1056,12 @@ class VPOTrainer:
                    "elapsed_sec": time.monotonic() - t0,
                    "gpu_hours": (time.monotonic() - self._started) * self.cfg.allocated_gpu_count / 3600}
         metrics.update(selection_stats)
+        metrics.update(probability_metrics)
+        initial_delta = torch.cat(initial_hf_deltas).double()
+        metrics["initial_hf_logp_max_abs_error"] = float(initial_delta.abs().max())
+        metrics["initial_hf_ratio_clip_fraction"] = float(((initial_delta < math.log1p(-self.cfg.clip_eps))
+                                                          | (initial_delta > math.log1p(self.cfg.clip_eps))).double().mean())
+        metrics.update(getattr(self, "_reward_alignment_stats", {}))
         if soft:
             metrics["length_reward_sigma0"] = self.cfg.length_reward_sigma0
         metrics.update({f"phase_{k}": v for k, v in phase.items()})
@@ -980,7 +1071,7 @@ class VPOTrainer:
             ess = lengths.square() / w.square().sum(-1).clamp_min(1e-12)
             metrics["credit_ess_ratio"] = float((ess / lengths.clamp_min(1)).mean())
             # Per-rollout weight-distribution summary plus a full histogram in
-            # credit_stats.jsonl (fixed 0.05-wide bins over [0, 3]) with the
+            # credit_stats.jsonl (0.05-wide bins covering the complete lambda band) with the
             # per-response adaptive taus — the analysis artifacts for the
             # lambda-band dose-response study.
             # Distribution stats on a CPU copy: aten::histogram with tensor
@@ -998,11 +1089,14 @@ class VPOTrainer:
             metrics["credit_tau_adaptive_mean"] = float(tau_used.mean())
             metrics["credit_lambda_binding"] = float(
                 (tau_used > self.cfg.tau).float().mean())
-            hist = torch.histogram(wv, bins=torch.linspace(0, 3.0, 61, device=wv.device))
+            histogram_max = math.ceil(max(3., self.cfg.credit_lambda, float(wv.max())) * 20) / 20
+            hist = torch.histogram(wv, bins=torch.linspace(0, histogram_max,
+                                   round(histogram_max * 20) + 1, device=wv.device))
             with (Path(self.cfg.output_dir) / "credit_stats.jsonl").open("a") as f:
                 f.write(json.dumps({"rollout": self.rollout_index,
                                     "tau": [round(float(t), 4) for t in tau_used],
                                     "w_hist": [int(c) for c in hist.hist],
+                                    "bin_edges": hist.bin_edges.tolist(),
                                     "bin_width": 0.05}) + "\n")
             # Per-token credit dump (~0.5 MB/step) for case studies: token ids
             # live in rollout-N-tokens.json; this adds the direction d_t and
@@ -1041,6 +1135,7 @@ class VPOTrainer:
             state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
         torch.save(state, path / "trainer_state.pt")
         manifest = {"resolved_config": asdict(self.cfg),
+            "reward_input_protocol": REWARD_INPUT_PROTOCOL,
             "model": self.cfg.model_name, "reward_model": self.cfg.reward_model_name,
             "step": step, "total_tokens": self.total_tokens,
             "sampling": self.sampling_manifest(), "resume_supported": False,
