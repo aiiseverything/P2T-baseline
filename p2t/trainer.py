@@ -972,6 +972,8 @@ def main(argv=None):
     parser.add_argument("--calibration-prompts", type=int, default=None)
     parser.add_argument("--sigma0", type=float, default=None)
     parser.add_argument("--max-rollouts", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the resolved configuration and exit without loading a model")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -980,6 +982,8 @@ def main(argv=None):
                         ("sigma0", args.sigma0), ("rollout_iterations", args.max_rollouts)):
         if value is not None:
             setattr(config, name, value)
+    if args.dry_run:
+        config.dry_run = True
     if not config.report_dir:
         config.report_dir = str(Path(config.output_dir) / "report")
     if config.dry_run:

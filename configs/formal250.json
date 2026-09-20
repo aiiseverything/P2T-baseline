@@ -63,8 +63,8 @@
   "token_chunk_size": 128,
   "validation_size": 2000,
   "push_every": 5,
-  "push_remote": "origin",
-  "push_branch": "p2t-baseline",
+  "push_remote": "p2t-origin",
+  "push_branch": "main",
   "keep_adapters": 2,
   "policy_head_dtype": "float32"
 }
