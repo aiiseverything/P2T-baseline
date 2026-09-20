@@ -101,6 +101,7 @@ class TrainerConfig:
     degenerate_penalty: float = 1.0
     # --- bookkeeping ----------------------------------------------------------
     gate_initial_hf_clip: bool = True  # abort if the first re-forward disagrees
+    max_unmapped_content_fraction: float = .25  # the project's startup bound
     checkpoint_interval: int = 0  # 0 -> only the final adapter
     keep_adapters: int = 2  # most recent per-step vLLM adapters retained on disk
     token_chunk_size: int = 128
@@ -450,6 +451,16 @@ class P2TTrainer:
         stats["p2t_unmapped_share_mean"] = float(
             fixed_weight_mask.sum() / rmask.sum().clamp_min(1))
         stats["p2t_null_token_id"] = self.null_token_id
+        # The project's startup gate bounds how much *real text* failed to map.
+        # If a large share of content tokens carry no reward-model gradient, the
+        # attribution is mostly structural zeros and Eq. (3) is being driven by
+        # positions the reward model never read.
+        if (self.rollout_index == 0
+                and stats["rm_unmapped_content_fraction"] > self.cfg.max_unmapped_content_fraction):
+            raise ValueError(
+                f"Unmapped content tokens are {stats['rm_unmapped_content_fraction']:.3f} of "
+                f"the response, above the {self.cfg.max_unmapped_content_fraction} bound; "
+                f"the actor-to-RM token mapping is not holding")
         del grads
         return rewards, attribution, fixed_weight_mask.to(self.actor_device), stats
 
@@ -473,9 +484,17 @@ class P2TTrainer:
 
         clock = phase("generation_sec", started)
         # `self.rollout` returns (rollout, generation_summary); the selector wants
-        # the tuple alone.
+        # the tuple alone, but the sampling provenance still has to reach the log.
+        sampling_summary = {}
+
+        def rollout_for_selection(batch):
+            rollout, summary = self.rollout(batch)
+            if not sampling_summary:
+                sampling_summary.update(summary)
+            return rollout
+
         rollout, prompts, selection = select_training_rollout(
-            lambda batch: self.rollout(batch)[0], prompts, group_size=self.cfg.group_size,
+            rollout_for_selection, prompts, group_size=self.cfg.group_size,
             pad_token_id=self.actor_tokenizer.pad_token_id,
             flag_degenerate=self._degeneracy, device=self.actor_device,
             stop_token_ids=self.stop_token_ids,
@@ -590,7 +609,7 @@ class P2TTrainer:
         minibatch = self.cfg.optimizer_minibatch_responses
         micro = max(1, self.cfg.microbatch_responses)
         loss_value, optimizer_steps, grad_norm = 0.0, 0, 0.0
-        initial_delta = None
+        initial_delta, initial_clip_fraction = None, 0.0
         for start in range(0, batch, minibatch):
             end = min(batch, start + minibatch)
             self.optimizer.zero_grad(set_to_none=True)
@@ -607,8 +626,21 @@ class P2TTrainer:
                     token_chunk_size=self.cfg.token_chunk_size)
                 if initial_delta is None:
                     # The first trainable forward must reproduce the cached old
-                    # policy log-probabilities at theta = theta_old.
+                    # policy log-probabilities at theta = theta_old.  Checked
+                    # here, before backward, so a protocol mismatch aborts the
+                    # run instead of updating once under the broken protocol and
+                    # reporting it afterwards.
                     initial_delta = (new_logp.detach() - old_logp[sl])[rmask[sl]]
+                    initial_clip_fraction = float(
+                        ((initial_delta < math.log1p(-self.cfg.clip_eps))
+                         | (initial_delta > math.log1p(self.cfg.clip_eps))).float().mean())
+                    if (self.cfg.gate_initial_hf_clip and self.rollout_index == 0
+                            and initial_clip_fraction):
+                        raise ValueError(
+                            f"First re-forward disagrees with the sampler "
+                            f"(max |delta| {float(initial_delta.abs().max()):.3e}, "
+                            f"clip fraction {initial_clip_fraction:.3f}); the sampler "
+                            f"and trainer probability protocols differ")
                 chunk = grpo_policy_loss(new_logp, old_logp[sl], credit.advantage[sl], rmask[sl],
                                          self.cfg.clip_eps, importance_weights=importance[sl])
                 if self.cfg.beta:
@@ -675,21 +707,14 @@ class P2TTrainer:
         metrics.update(alignment)
         metrics.update(selection)
         metrics.update(probability_metrics)
+        # Sampling provenance: temperature, top-p/k, suppressed-token digest,
+        # engine timing, adapter id.  The other arms record the equivalent, and
+        # its absence would be silent.
+        metrics.update({key: value for key, value in sampling_summary.items()
+                        if isinstance(value, (int, float, str, bool))})
         if initial_delta is not None:
-            clip_fraction = float(((initial_delta < math.log1p(-self.cfg.clip_eps))
-                                   | (initial_delta > math.log1p(self.cfg.clip_eps))).float().mean())
             metrics["initial_hf_logp_max_abs_error"] = float(initial_delta.abs().max())
-            metrics["initial_hf_ratio_clip_fraction"] = clip_fraction
-            # The same gate the project's launcher applies: at theta = theta_old
-            # the re-forward must land inside the clipping band, otherwise the
-            # sampler and the trainer are running different probability protocols
-            # and the importance weights would hide it for the whole run.
-            if self.cfg.gate_initial_hf_clip and self.rollout_index == 1 and clip_fraction:
-                raise ValueError(
-                    f"First re-forward disagrees with the sampler "
-                    f"(max |delta| {metrics['initial_hf_logp_max_abs_error']:.3e}, "
-                    f"clip fraction {clip_fraction:.3f}); the sampler and trainer "
-                    f"probability protocols differ")
+            metrics["initial_hf_ratio_clip_fraction"] = initial_clip_fraction
         metrics.update({f"phase_{key}": value for key, value in timings.items()})
         if self.actor_device.type == "cuda":
             metrics["actor_peak_gb"] = torch.cuda.max_memory_allocated(self.actor_device) / 2 ** 30

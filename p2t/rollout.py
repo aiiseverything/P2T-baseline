@@ -66,10 +66,12 @@ def _check_sources(rollout, stop_token_ids, max_response_tokens) -> None:
 
     ``_pack`` re-densifies the mask, so a source with an interior hole would be
     silently repaired rather than rejected -- check the sources, not just the
-    merged result.
+    merged result.  ``_pack`` assumes right-padded rows, so this is the check
+    that makes that assumption hold; it is required, not optional.
     """
-    if stop_token_ids is None:
-        return
+    if stop_token_ids is None or max_response_tokens is None:
+        raise ValueError("select_training_rollout requires stop_token_ids and "
+                         "max_response_tokens so sources can be validated")
     validate_response_termination(rollout[3], rollout[4], rollout[6],
                                   stop_token_ids, max_response_tokens)
 
@@ -128,8 +130,8 @@ def _pack(rollout, indices, width: int, prompt_width: int, pad_token_id: int, de
 
 @torch.no_grad()
 def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_id: int,
-                            flag_degenerate, device, stop_token_ids=None,
-                            max_response_tokens: int | None = None):
+                            flag_degenerate, device, stop_token_ids,
+                            max_response_tokens: int):
     """Sample prompt groups, resample wholly-bad groups once, drop what remains.
 
     ``rollout_fn(prompts)`` must return the bare 8-field rollout tuple, not a
@@ -139,8 +141,7 @@ def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_i
     weight decay.
     """
     rollout = rollout_fn(prompts)
-    if max_response_tokens is not None:
-        _check_sources(rollout, stop_token_ids, max_response_tokens)
+    _check_sources(rollout, stop_token_ids, max_response_tokens)
     usable = _usable_rows(rollout, flag_degenerate)
     good = _usable_groups(usable, len(prompts), group_size)
     stats = {"input_prompt_groups": len(prompts),
@@ -154,8 +155,7 @@ def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_i
     if stats["resampled_groups"]:
         retry_prompts = [prompt for prompt, ok in zip(prompts, good) if not ok]
         retry = rollout_fn(retry_prompts)
-        if max_response_tokens is not None:
-            _check_sources(retry, stop_token_ids, max_response_tokens)
+        _check_sources(retry, stop_token_ids, max_response_tokens)
         retry_usable = _usable_rows(retry, flag_degenerate)
         retry_good = _usable_groups(retry_usable, len(retry_prompts), group_size)
         stats["skipped_groups"] = sum(1 for ok in retry_good if not ok)

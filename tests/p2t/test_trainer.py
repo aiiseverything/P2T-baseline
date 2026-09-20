@@ -284,6 +284,7 @@ def _stub_trainer(tmp_path, *, group_size=2, prompts=1, vocab=19, dim=8,
     def fake_build_rm_batch(*args, **kwargs):
         fixed = torch.zeros((prompts * group_size, trainer.cfg.max_response_tokens), dtype=torch.bool)
         stats = {"rm_max_input_tokens": 4, "rm_mapped_tokens": 3, "rm_unmapped_tokens": 0,
+                 "rm_unmapped_content_tokens": 0, "rm_unmapped_content_fraction": 0.0,
                  "p2t_unmapped_share_mean": 0.0, "p2t_null_token_id": 0}
         return rows, mapped.clone(), fixed, stats
 
@@ -340,6 +341,59 @@ def test_train_rollout_diagnostics_survive_rectangular_batches(tmp_path, monkeyp
     assert metrics["reward_count"] == 6
     assert math.isfinite(metrics["p2t_varying_bonus_over_advantage"])
     assert math.isfinite(metrics["p2t_zero_attribution_share_mass"])
+
+
+def test_sampler_disagreement_gate_fires_before_the_optimizer_step(tmp_path, monkeypatch):
+    """A protocol mismatch must abort the step, not be reported after it.
+
+    Gating inside the metrics block would let the first optimizer step apply a
+    gradient computed under the very protocol the gate just called broken.
+    """
+    trainer, fake_batch, fake_score = _stub_trainer(tmp_path)
+    monkeypatch.setattr("p2t.trainer.build_rm_batch", fake_batch)
+    monkeypatch.setattr("p2t.trainer.score_responses", fake_score)
+    steps = {"count": 0}
+    real_step = trainer.optimizer.step
+
+    def counting_step(*args, **kwargs):
+        steps["count"] += 1
+        return real_step(*args, **kwargs)
+
+    # Shift every cached old log-probability far outside the clipping band.
+    real_logp = trainer.rollout
+
+    def shifted_rollout(batch_prompts):
+        rollout, summary = real_logp(batch_prompts)
+        return rollout, summary
+
+    trainer.optimizer.step = counting_step
+    import p2t.policy as policy_module
+    real_micro = policy_module.rollout_logp_microbatch
+
+    def shifted_micro(*args, **kwargs):
+        out = real_micro(*args, **kwargs)
+        return out + 1.0  # 1 nat of disagreement, far past log1p(0.2)
+
+    monkeypatch.setattr("p2t.trainer.rollout_logp_microbatch", shifted_micro)
+    trainer.rollout = shifted_rollout
+
+    with pytest.raises(ValueError, match="probability protocols differ"):
+        trainer.train_rollout(["p"])
+    assert steps["count"] == 0, "the optimizer must not step under a broken protocol"
+
+
+def test_unmapped_content_gate_rejects_a_failing_mapping(tmp_path, monkeypatch):
+    trainer, fake_batch, fake_score = _stub_trainer(tmp_path)
+
+    def bad_mapping(*args, **kwargs):
+        rows, mapped, fixed, stats = fake_batch(*args, **kwargs)
+        stats["rm_unmapped_content_fraction"] = 0.9
+        return rows, mapped, fixed, stats
+
+    monkeypatch.setattr("p2t.trainer.build_rm_batch", bad_mapping)
+    monkeypatch.setattr("p2t.trainer.score_responses", fake_score)
+    with pytest.raises(ValueError, match="Unmapped content tokens"):
+        trainer.train_rollout(["p"])
 
 
 def test_train_rollout_skips_the_update_when_no_group_survives(tmp_path, monkeypatch):

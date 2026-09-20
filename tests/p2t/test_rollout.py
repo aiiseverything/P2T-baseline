@@ -19,7 +19,8 @@ def _rollout(prompt_count, length, reason, degenerate=False):
     mask = torch.zeros((count, WIDTH), dtype=torch.long)
     logprobs = torch.zeros((count, WIDTH))
     for index in range(count):
-        responses[index, :length] = torch.arange(1, length + 1)
+        # Values start above the stop id so the terminal marker is the only one.
+        responses[index, :length] = torch.arange(3, length + 3)
         if reason == "stop":
             responses[index, length - 1] = 2  # a registered stop id
         mask[index, :length] = 1
@@ -50,7 +51,8 @@ def test_good_groups_pass_through_untouched():
     rollout = _rollout(2, 4, "stop")
     result, prompts, stats = select_training_rollout(
         lambda ps: rollout, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=_flags(), device=torch.device("cpu"))
+        flag_degenerate=_flags(), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert result is not None and prompts == ["a", "b"]
     assert stats["resampled_groups"] == 0 and stats["skipped_groups"] == 0
     assert stats["kept_prompt_groups"] == 2
@@ -61,7 +63,8 @@ def test_padding_is_trimmed_to_the_longest_survivor():
     rollout = _rollout(2, 4, "stop")
     result, _, _ = select_training_rollout(
         lambda ps: rollout, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=_flags(), device=torch.device("cpu"))
+        flag_degenerate=_flags(), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert result[3].shape == (2 * GROUP, 4)
 
 
@@ -71,11 +74,13 @@ def test_wholly_bad_group_is_resampled_once_and_kept_when_it_recovers():
     def rollout_fn(prompts):
         calls.append(len(prompts))
         # first pass: everything truncated. retry: everything stops properly.
-        return _rollout(len(prompts), 4, "length" if len(calls) == 1 else "stop")
+        return _rollout(len(prompts), WIDTH if len(calls) == 1 else 4,
+                        "length" if len(calls) == 1 else "stop")
 
     result, prompts, stats = select_training_rollout(
         rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=_flags(), device=torch.device("cpu"))
+        flag_degenerate=_flags(), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert calls == [2, 2], "a whole round of groups is resampled together"
     assert result is not None and prompts == ["a", "b"]
     assert stats["resampled_groups"] == 2 and stats["skipped_groups"] == 0
@@ -83,8 +88,9 @@ def test_wholly_bad_group_is_resampled_once_and_kept_when_it_recovers():
 
 def test_group_that_stays_bad_is_dropped_and_nothing_survives():
     result, prompts, stats = select_training_rollout(
-        lambda ps: _rollout(len(ps), 4, "length"), ["a", "b"], group_size=GROUP,
-        pad_token_id=PAD, flag_degenerate=_flags(), device=torch.device("cpu"))
+        lambda ps: _rollout(len(ps), WIDTH, "length"), ["a", "b"], group_size=GROUP,
+        pad_token_id=PAD, flag_degenerate=_flags(), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert result is None, "nothing survived, so the caller must skip the update"
     assert prompts == [] and stats["kept_prompt_groups"] == 0
 
@@ -98,7 +104,8 @@ def test_degenerate_group_is_dropped_but_a_healthy_one_survives():
 
     result, prompts, stats = select_training_rollout(
         rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=_flags(degenerate_groups=(0,)), device=torch.device("cpu"))
+        flag_degenerate=_flags(degenerate_groups=(0,)), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert calls == [2, 1], "only the bad group is resampled"
     assert prompts == ["b"], "group a is degenerate twice over, so it is dropped"
     assert result is not None and result[3].shape[0] == GROUP
@@ -129,7 +136,8 @@ def test_pieces_of_different_widths_merge_into_one_batch():
 
     result, prompts, stats = select_training_rollout(
         rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=flag_degenerate, device=torch.device("cpu"))
+        flag_degenerate=flag_degenerate, device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert calls == [2, 1], "only group a is resampled"
     # Survivors of the first pass keep their order; resampled groups follow.
     # Group order inside a rollout does not change any group-relative quantity.
@@ -175,7 +183,8 @@ def test_retry_batch_with_a_narrower_prompt_block_still_merges():
 
     result, prompts, _ = select_training_rollout(
         rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
-        flag_degenerate=flag_degenerate, device=torch.device("cpu"))
+        flag_degenerate=flag_degenerate, device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
     assert calls == [2, 1]
     assert result is not None
     assert result[0].shape[0] == 2 * GROUP
@@ -215,7 +224,8 @@ def test_rollout_fn_must_return_the_bare_tuple():
     with pytest.raises((IndexError, TypeError, KeyError)):
         select_training_rollout(lambda ps: (rollout, {"summary": 1}), ["a"],
                                 group_size=GROUP, pad_token_id=PAD,
-                                flag_degenerate=_flags(), device=torch.device("cpu"))
+                                flag_degenerate=_flags(), device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
 
 
 def test_termination_validation_accepts_consistent_metadata():

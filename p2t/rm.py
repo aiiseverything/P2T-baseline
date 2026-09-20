@@ -103,11 +103,23 @@ def build_rm_batch(actor_tokenizer, reward_tokenizer, prompts, responses, respon
         rows.append(encoded.input_ids)
         mapped[index, valid] = torch.tensor(encoded.response_positions, device=mapped.device)
     fixed_weight_mask = response_mask & mapped.lt(0)
+    # Content-restricted unmapped fraction.  The plain unmapped count is
+    # dominated by the terminal special token, which the reward model pools at and
+    # which is *always* unmapped by construction, so it cannot answer "did the
+    # mapping fail for real text".  This is the statistic the parent project
+    # bounds at 0.25 in its startup gate.
+    from .tokens import get_special_token_ids
+    special_ids = torch.tensor(get_special_token_ids(actor_tokenizer), device=responses.device)
+    content_mask = response_mask & ~torch.isin(responses, special_ids)
+    unmapped_content = (content_mask & fixed_weight_mask).sum()
     stats = {
         "rm_max_input_tokens": max(map(len, rows)),
         "rm_input_token_budget": rm_budget,
         "rm_mapped_tokens": int((response_mask & mapped.ge(0)).sum()),
         "rm_unmapped_tokens": int(fixed_weight_mask.sum()),
+        "rm_unmapped_content_tokens": int(unmapped_content),
+        "rm_unmapped_content_fraction": float(
+            unmapped_content / content_mask.sum().clamp_min(1)),
     }
     return rows, mapped, fixed_weight_mask, stats
 
