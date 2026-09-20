@@ -24,11 +24,17 @@ PUSH_ATTEMPTS = 3
 
 class AutoPusher:
     def __init__(self, *, enabled: bool, every: int, remote: str, branch: str,
-                 report_dir: Path, repo_root: Path):
+                 report_dir: Path, repo_root: Path, local_branch: str | None = None):
         self.enabled = bool(enabled and every > 0)
         self.every = max(1, int(every))
         self.remote = remote
+        # ``branch`` is the branch on the *remote*; ``local_branch`` is the branch
+        # this checkout must be on before anything is committed.  They are not
+        # always the same name: this work lives on a local ``p2t-baseline`` while
+        # the dedicated P2T remote takes it as ``main``.  Conflating the two made
+        # every push abort with "refused_wrong_branch", so no step ever pushed.
         self.branch = branch
+        self.local_branch = local_branch or branch
         self.report_dir = Path(report_dir)
         self.repo_root = Path(repo_root)
         self.log_path = self.report_dir / "git_push.log"
@@ -37,8 +43,14 @@ class AutoPusher:
 
     # ------------------------------------------------------------------ helpers
     def _run(self, *args, check=True, env=None):
+        # GIT_TERMINAL_PROMPT=0 is load-bearing for a detached run: it has no
+        # controlling terminal, and if the credential helper's file is absent git
+        # would otherwise try to prompt for a username.  Failing fast turns a
+        # possible stall into a logged ``push_failed``, which is already treated as
+        # non-fatal.  The commit itself still lands locally, so nothing is lost.
         result = subprocess.run(["git", *args], cwd=self.repo_root, capture_output=True,
-                                text=True, env={**os.environ, **(env or {})})
+                                text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0",
+                                                **(env or {})})
         if check and result.returncode != 0:
             raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
         return result
@@ -75,9 +87,9 @@ class AutoPusher:
 
     def _push_locked(self, step: int, metrics: dict) -> bool:
         current = self._run("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if current != self.branch:
+        if current != self.local_branch:
             self._log({"step": step, "status": "refused_wrong_branch", "branch": current,
-                       "at": time.time()})
+                       "expected": self.local_branch, "at": time.time()})
             return False
         self._run("add", "-A")
         staged = [name for name in self._run("diff", "--cached", "--name-only").stdout.split("\n")
@@ -103,10 +115,12 @@ class AutoPusher:
         message = (f"p2t step {step}: {summary}\n\n"
                    f"loss {metrics.get('loss')}, grad_norm {metrics.get('grad_norm')}, "
                    f"mean response tokens {metrics.get('mean_response_tokens')}\n\n"
-                   "Co-Authored-By: Claude Code <noreply@anthropic.com>")
+                   "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>")
         self._run("commit", "-m", message, "-q")
+        # Explicit refspec: the local branch may not be named like the remote one.
+        refspec = f"{self.local_branch}:{self.branch}"
         for attempt in range(PUSH_ATTEMPTS):
-            result = self._run("push", self.remote, self.branch, check=False)
+            result = self._run("push", self.remote, refspec, check=False)
             if result.returncode == 0:
                 sha = self._run("rev-parse", "HEAD").stdout.strip()
                 self._log({"step": step, "status": "pushed", "sha": sha, "at": time.time()})

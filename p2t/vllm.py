@@ -194,7 +194,8 @@ class GenerationServer:
 
     def __init__(self, *, model, tokenizer_source, socket_path, gpus, max_num_seqs,
                  seed, gpu_memory_utilization, tensor_parallel_size,
-                 policy_head_dtype="float32", log_path=None):
+                 policy_head_dtype="float32", log_path=None,
+                 disable_custom_all_reduce=True):
         self.socket_path = Path(socket_path)
         self.log_path = Path(log_path) if log_path else None
         repository_root = str(Path(__file__).resolve().parents[1])
@@ -211,6 +212,20 @@ class GenerationServer:
                    "--gpu-memory-utilization", str(gpu_memory_utilization),
                    "--tensor-parallel-size", str(tensor_parallel_size),
                    "--policy-head-dtype", policy_head_dtype]
+        # The L20 is compute capability 8.9 with PCIe-bridge peer-to-peer and no
+        # NVLink.  vLLM's custom all-reduce intermittently fails there with
+        # "Cuda error custom_all_reduce.cuh:164 'invalid argument'", which kills a
+        # tensor-parallel worker and takes the engine core down during startup --
+        # the failure that killed the first pilot.  NCCL is correct on this
+        # topology, only slower.
+        #
+        # This MUST be an engine argument, not an environment variable: the
+        # installed vLLM has no VLLM_DISABLE_CUSTOM_ALL_REDUCE and logs
+        # "Unknown vLLM environment variable detected" while leaving
+        # disable_custom_all_reduce=False, so setting the environment silently
+        # does nothing at all.
+        if disable_custom_all_reduce:
+            command.append("--disable-custom-all-reduce")
         handle = open(self.log_path, "ab") if self.log_path else subprocess.DEVNULL
         self.process = subprocess.Popen(command, env=env, stdout=handle, stderr=subprocess.STDOUT)
         self._connection = None

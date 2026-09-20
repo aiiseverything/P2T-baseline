@@ -1,0 +1,98 @@
+=== watcher started 2026-09-21T01:35:56+08:00 for smoke10, every 300s ===
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout None: raw_reward None, loss None, grad_norm None, tokens None, ESS/T None, varying/adv None
+  PROBLEM: no optimizer step on the last rollout: None
+  PROBLEM: loss is not finite: None
+  PROBLEM: grad_norm is not finite: None
+  PROBLEM: raw_reward_mean is not finite: None
+  PROBLEM: response_entropy is not finite: None
+  PROBLEM: kl_to_init is not finite: None
+  PROBLEM: mean_response_tokens is not finite: None
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout None: raw_reward None, loss None, grad_norm None, tokens None, ESS/T None, varying/adv None
+  PROBLEM: no optimizer step on the last rollout: None
+  PROBLEM: loss is not finite: None
+  PROBLEM: grad_norm is not finite: None
+  PROBLEM: raw_reward_mean is not finite: None
+  PROBLEM: response_entropy is not finite: None
+  PROBLEM: kl_to_init is not finite: None
+  PROBLEM: mean_response_tokens is not finite: None
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout 1: raw_reward -3.323028564453125, loss 0.34262104687513784, grad_norm 1.564721941947937, tokens 630.6875, ESS/T 0.99640953540802, varying/adv 1.6834472262416966e-05
+  PROBLEM: sampler/trainer log-prob disagreement 8.796e-01
+  PROBLEM: attribution softmax is flat (credit_ess_ratio 0.99641); the token term is inert
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout 1: raw_reward -3.323028564453125, loss 0.34262104687513784, grad_norm 1.564721941947937, tokens 630.6875, ESS/T 0.99640953540802, varying/adv 1.6834472262416966e-05
+  PROBLEM: sampler/trainer log-prob disagreement 8.796e-01
+  PROBLEM: attribution softmax is flat (credit_ess_ratio 0.99641); the token term is inert
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout 2: raw_reward -2.710966110229492, loss 0.2722159300465137, grad_norm 0.4811350703239441, tokens 702.296875, ESS/T 0.9979960918426514, varying/adv 1.3997086171002593e-05
+  PROBLEM: sampler/trainer log-prob disagreement 1.138e+00
+  PROBLEM: attribution softmax is flat (credit_ess_ratio 0.99800); the token term is inert
+Traceback (most recent call last):
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 114, in <module>
+    main()
+  File "/home/ml-user/workdir/project-1/baseline/scripts/plot_reward.py", line 54, in main
+    steps = [row["rollout"] for row in rows]
+             ~~~^^^^^^^^^^^
+KeyError: 'rollout'
+rollout 2: raw_reward -2.710966110229492, loss 0.2722159300465137, grad_norm 0.4811350703239441, tokens 702.296875, ESS/T 0.9979960918426514, varying/adv 1.3997086171002593e-05
+  PROBLEM: sampler/trainer log-prob disagreement 1.138e+00
+  PROBLEM: attribution softmax is flat (credit_ess_ratio 0.99800); the token term is inert
+wrote /home/ml-user/workdir/project-1/baseline/reports/smoke10/reward.png
+{
+  "run": "smoke10",
+  "rollouts": 3,
+  "raw_reward_first": -3.323028564453125,
+  "raw_reward_last": 1.2073974609375,
+  "raw_reward_mean": -1.608865737915039,
+  "sigma0": 6.734913361481443,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9973416527112325,
+  "p2t_flat_response_fraction": 0.7447916666666666,
+  "p2t_onehot_response_fraction": 0.0,
+  "p2t_bonus_over_advantage": 0.8307937383651733,
+  "p2t_varying_bonus_over_advantage": 1.7536284152204946e-05,
+  "p2t_sign_flip_fraction": 0.09684261679649353,
+  "p2t_zero_attribution_share_mass": 0.03434061290075382,
+  "p2t_unmapped_share_mean": 0.0553543329394112,
+  "mean_response_tokens": 627.3697916666666,
+  "elapsed_sec_total": 1615.3956201379187,
+  "actor_peak_gb": 38.58800411224365,
+  "reward_peak_gb": 28.60657548904419,
+  "figure": "smoke10/reward.png"
+}
+rollout 3: raw_reward 1.2073974609375, loss -0.11909027872025035, grad_norm 1.2214930057525635, tokens 549.125, ESS/T 0.9976193308830261, varying/adv 2.177729402319528e-05
+  PROBLEM: attribution softmax is flat (credit_ess_ratio 0.99762); the token term is inert
+  PROBLEM: response length falling -41 tokens/rollout

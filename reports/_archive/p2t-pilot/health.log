@@ -1,0 +1,7 @@
+=== watcher started 2026-09-21T00:12:22+08:00 for p2t-pilot, every 180s ===
+=== training process gone at 2026-09-21T00:18:22+08:00 ===
+  File "/home/ml-user/workdir/project-1/baseline/p2t/trainer.py", line 1019, in main
+    trainer.generation.wait_until_ready()
+  File "/home/ml-user/workdir/project-1/baseline/p2t/vllm.py", line 223, in wait_until_ready
+    raise RuntimeError(f"vLLM server exited with code {self.process.returncode}")
+RuntimeError: vLLM server exited with code 1

@@ -33,6 +33,10 @@ def parse_args(argv=None):
     p.add_argument("--gpu-memory-utilization", type=float, default=.85)
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument("--policy-head-dtype", choices=("native", "float32"), default="float32")
+    p.add_argument("--disable-custom-all-reduce", action="store_true",
+                   help="Route tensor-parallel all-reduce through NCCL. Required on "
+                        "PCIe-bridge topologies without NVLink, where vLLM's custom "
+                        "all-reduce raises a CUDA 'invalid argument' and kills the engine.")
     args = p.parse_args(argv)
     if not math.isfinite(args.gpu_memory_utilization) or not 0 < args.gpu_memory_utilization <= 1:
         p.error("--gpu-memory-utilization must be in (0, 1]")
@@ -67,7 +71,21 @@ def main() -> None:
         max_model_len=4096, max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=args.gpu_memory_utilization,
         tensor_parallel_size=args.tensor_parallel_size,
+        disable_custom_all_reduce=args.disable_custom_all_reduce,
     )
+    # Fail closed if the backend quietly ignored the request: a silent
+    # re-enable is what took the first pilot's engine core down.  The lookup
+    # itself is best effort -- an internal attribute path that moves between
+    # vLLM versions must not become a new startup crash of its own.
+    resolved = None
+    try:
+        resolved = llm.llm_engine.vllm_config.parallel_config.disable_custom_all_reduce
+    except AttributeError:
+        pass
+    if args.disable_custom_all_reduce and resolved is False:
+        raise RuntimeError("vLLM ignored --disable-custom-all-reduce; its custom "
+                           "all-reduce is unsafe on this PCIe-bridge topology")
+    print(f"custom_all_reduce_disabled={resolved}", flush=True)
     sock_path = Path(args.socket)
     sock_path.unlink(missing_ok=True)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

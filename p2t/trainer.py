@@ -104,12 +104,14 @@ class TrainerConfig:
     max_unmapped_content_fraction: float = .25  # the project's startup bound
     checkpoint_interval: int = 0  # 0 -> only the final adapter
     keep_adapters: int = 2  # most recent per-step vLLM adapters retained on disk
+    keep_checkpoints: int = 2  # most recent checkpoints kept; < 1 keeps every one
     token_chunk_size: int = 128
     validation_size: int = 2000
     fit_prompt_filter: bool = True
     push_every: int = 0  # 0 disables autopush
     push_remote: str = "origin"
-    push_branch: str = "p2t-baseline"
+    push_branch: str = "p2t-baseline"       # branch name on the remote
+    push_local_branch: str = "p2t-baseline"  # branch this checkout must be on
     dry_run: bool = False
 
     def resolved(self) -> "TrainerConfig":
@@ -220,6 +222,7 @@ class P2TTrainer:
         self.started = time.monotonic()
         self.pusher = AutoPusher(enabled=bool(self.cfg.push_every), every=self.cfg.push_every,
                                  remote=self.cfg.push_remote, branch=self.cfg.push_branch,
+                                 local_branch=self.cfg.push_local_branch,
                                  report_dir=self.report_dir, repo_root=Path(__file__).resolve().parents[1])
 
     # ------------------------------------------------------------------ loading
@@ -519,7 +522,13 @@ class P2TTrainer:
         if self.sigma0 is None:
             raise RuntimeError("Call prepare_sigma0(training_prompts) before training")
 
-        clock = phase("generation_sec", started)
+        # `phase(name, start)` records the work between `start` and now, so every
+        # call has to come *after* the work it names.  This one used to sit here,
+        # before generation, which shifted every label by one: `generation_sec`
+        # reported ~0 and the real generation cost was filed under
+        # `reward_model_gradient_sec`.  The plan's time budget is backfilled from
+        # these numbers, so the labels have to mean what they say.
+        clock = started
         # `self.rollout` returns (rollout, generation_summary); the selector wants
         # the tuple alone, but the sampling provenance still has to reach the log.
         sampling_summary = {}
@@ -536,6 +545,7 @@ class P2TTrainer:
             flag_degenerate=self._degeneracy, device=self.actor_device,
             stop_token_ids=self.stop_token_ids,
             max_response_tokens=self.cfg.max_response_tokens)
+        clock = phase("generation_sec", clock)
         self._write_rollout_artifacts(prompts, rollout)
         if rollout is None:
             # No response reaches the loss, including KL, Adam moments or decay.
@@ -545,7 +555,7 @@ class P2TTrainer:
                        "loss": 0.0, "elapsed_sec": time.monotonic() - started,
                        "gpu_hours": (time.monotonic() - self.started)
                        * (2 + self.cfg.vllm_tensor_parallel_size) / 3600,
-                       "phase_generation_sec": clock - started, **selection}
+                       "phase_generation_sec": timings["generation_sec"], **selection}
             self._log(metrics)
             self.pusher.maybe_push(self.rollout_index, metrics)
             return metrics
@@ -557,8 +567,8 @@ class P2TTrainer:
         self._validate_rollout((input_ids, full_mask, positions, responses, rmask, _,
                                 finish_reasons, rollout_logprobs), len(prompts))
 
-        clock = phase("reward_model_gradient_sec", clock)
         raw_rewards, attribution, _, alignment = self.score_and_attribute(prompts, responses, rmask)
+        clock = phase("reward_model_gradient_sec", clock)
         batch = raw_rewards.shape[0]
         group_ids = torch.arange(batch, device=self.reward_device) // self.cfg.group_size
         lengths = rmask.sum(-1).to(self.reward_device)
@@ -594,7 +604,6 @@ class P2TTrainer:
             shaped, group_ids,
             std_floor=self.cfg.advantage_std_floor_fraction * self.sigma0)
 
-        clock = phase("credit_sec", clock)
         credit = p2t_credit(raw_rewards, attribution, advantages, rmask.to(self.reward_device),
                             omega=self.cfg.omega, alpha=self.cfg.alpha)
         # Only the three [B, T] credit fields cross to the actor device; the
@@ -602,8 +611,8 @@ class P2TTrainer:
         credit = replace(credit, advantage=credit.advantage.to(self.actor_device),
                          direction=credit.direction.to(self.actor_device),
                          weight=credit.weight.to(self.actor_device), tau_used=None)
+        clock = phase("credit_sec", clock)
 
-        clock = phase("actor_old_logp_sec", clock)
         entropy = torch.zeros(responses.shape, dtype=torch.float32, device=self.actor_device)
         old_logp = rollout_logp_microbatch(
             self.actor, input_ids, full_mask, positions, responses, rmask, self.output_mask,
@@ -611,13 +620,14 @@ class P2TTrainer:
             min_response_tokens=self.cfg.min_response_tokens,
             stop_token_ids=self.stop_token_ids, token_chunk_size=self.cfg.token_chunk_size,
             entropy_out=entropy)
-        clock = phase("ref_logp_sec", clock)
+        clock = phase("actor_old_logp_sec", clock)
         reference_adapter = "ref" if self.cfg.init_adapter else "base"
         ref_logp = rollout_logp_microbatch(
             self.actor, input_ids, full_mask, positions, responses, rmask, self.output_mask,
             temperature=self.cfg.temperature, microbatch=self.cfg.microbatch_responses,
             adapter=reference_adapter, min_response_tokens=self.cfg.min_response_tokens,
             stop_token_ids=self.stop_token_ids, token_chunk_size=self.cfg.token_chunk_size)
+        clock = phase("ref_logp_sec", clock)
 
         # Sampler-to-HF correction: the actor re-forward is the clipping anchor,
         # so the ratio must carry the sampler's own chosen-token probability.
@@ -652,7 +662,6 @@ class P2TTrainer:
                  | (importance > 1 + self.cfg.clip_eps))[rmask].float().mean()),
         }
 
-        clock = phase("actor_update_sec", clock)
         self.actor.train()
         minibatch = self.cfg.optimizer_minibatch_responses
         micro = max(1, self.cfg.microbatch_responses)
@@ -708,9 +717,9 @@ class P2TTrainer:
             self.optimizer.step()
             optimizer_steps += 1
 
+        clock = phase("actor_update_sec", clock)
         self.total_tokens += int(rmask.sum().item())
         self.rollout_index += 1
-        clock = phase("logging_sec", clock)
 
         mask = rmask.to(self.reward_device)
         with torch.no_grad():
@@ -764,6 +773,9 @@ class P2TTrainer:
         if initial_delta is not None:
             metrics["initial_hf_logp_max_abs_error"] = float(initial_delta.abs().max())
             metrics["initial_hf_ratio_clip_fraction"] = initial_clip_fraction
+        # Everything after the optimizer step is metric computation, the P2T
+        # diagnostics included, so this is the phase that closes the step.
+        clock = phase("logging_sec", clock)
         metrics.update({f"phase_{key}": value for key, value in timings.items()})
         if self.actor_device.type == "cuda":
             metrics["actor_peak_gb"] = torch.cuda.max_memory_allocated(self.actor_device) / 2 ** 30
@@ -893,6 +905,24 @@ class P2TTrainer:
             handle.write(json.dumps(metrics, sort_keys=True) + "\n")
         print(json.dumps(metrics, sort_keys=True), flush=True)
 
+    def _prune_checkpoints(self):
+        """Keep only the newest checkpoints: each one is ~2 GiB on disk.
+
+        ``keep_checkpoints < 1`` keeps every checkpoint.  The final checkpoint is
+        always the newest, so it is never the one pruned.
+        """
+        if self.cfg.keep_checkpoints < 1:
+            return
+        paths = []
+        for path in self.output_dir.glob("checkpoint-*"):
+            try:
+                paths.append((int(path.name.split("-")[1]), path))
+            except (IndexError, ValueError):
+                continue  # not a step-numbered checkpoint; leave it alone
+        paths.sort()
+        for _, stale in paths[:max(0, len(paths) - self.cfg.keep_checkpoints)]:
+            shutil.rmtree(stale, ignore_errors=True)
+
     def save_checkpoint(self, step: int):
         path = self.output_dir / f"checkpoint-{step}"
         self.actor.save_pretrained(path)
@@ -901,9 +931,32 @@ class P2TTrainer:
             "resolved_config": asdict(self.cfg), "step": step,
             "reward_input_protocol": REWARD_INPUT_PROTOCOL,
             "p2t_protocol": P2T_APPROXIMATION, "total_tokens": self.total_tokens,
-            "null_token_id": self.null_token_id, "resume_supported": False,
+            "null_token_id": self.null_token_id,
+            # There is no in-place resume: the optimizer moments are not saved and
+            # `check_fresh_output` refuses to reuse a run directory.  What a
+            # checkpoint *does* support is relaunching as a new run seeded from
+            # these weights.  Spelling out what does and does not carry over, so a
+            # restart is not silently a different experiment.
+            "resume_supported": False,
+            "restart": {
+                "recipe": "point a new config's init_adapter at this directory and "
+                          "give it a fresh output_dir/report_dir",
+                "carries_over": ["LoRA weights (default + ref)", "tokenizer",
+                                 "the resolved config recorded here"],
+                "does_not_carry_over": [
+                    "AdamW moment estimates: the first steps after a restart take a "
+                    "larger effective step than they otherwise would",
+                    "the KL reference identity: beta-KL is measured against "
+                    "init_adapter, so a restart re-anchors it to these weights "
+                    "instead of the original SFT initialisation",
+                    "the prompt cursor: prompts are walked as "
+                    "(rollout_index * prompts_per_rollout) % len(prompts), so a "
+                    "restart begins again at the corpus start",
+                ],
+            },
             **self._adapter_identity},
             indent=2, default=str))
+        self._prune_checkpoints()
         return path
 
     # ------------------------------------------------------------------ driver
@@ -941,8 +994,10 @@ def check_fresh_output(output_dir) -> None:
     path = Path(output_dir)
     if not path.exists():
         return
+    # Not train.pid: the launcher writes that before the trainer starts, so
+    # including it would make every legitimate launch look like a reused run.
     markers = ("metrics.jsonl", "length_reward_calibration.json", "data_split.json",
-               "vllm-adapters", "train.pid")
+               "vllm-adapters", "run_manifest.json")
     found = [name for name in markers if (path / name).exists()]
     found += [entry.name for entry in path.glob("checkpoint-*")]
     found += [entry.name for entry in path.glob("rollout-*-credit.pt")]

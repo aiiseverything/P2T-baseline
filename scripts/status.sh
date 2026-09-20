@@ -9,8 +9,10 @@ RUN="${1:?usage: status.sh <run-name>}"
 CONFIG="${ROOT}/configs/${RUN}.json"
 [ -f "$CONFIG" ] || { echo "missing config: $CONFIG" >&2; exit 2; }
 
-OUT="${ROOT}/$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['output_dir'])" "$CONFIG")"
-REPORT="${ROOT}/$(python -c "import json,sys;print(json.load(open(sys.argv[1])).get('report_dir') or '')" "$CONFIG")"
+PY="${ROOT}/.venv/bin/python"
+[ -x "$PY" ] || PY=python
+OUT="${ROOT}/$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1]))['output_dir'])" "$CONFIG")"
+REPORT="${ROOT}/$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1])).get('report_dir') or '')" "$CONFIG")"
 [ -n "$REPORT" ] || REPORT="${OUT}/report"
 LOG="${OUT}/train.log"
 PID_FILE="${OUT}/train.pid"

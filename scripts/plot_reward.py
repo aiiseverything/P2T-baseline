@@ -34,7 +34,15 @@ def load_metrics(run_dir: Path):
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     if not rows:
         raise ValueError(f"metrics file is empty: {path}")
-    return rows
+    # The trainer also logs non-step events to this file -- `prompt_filter` is
+    # written before training starts and carries no "rollout" key.  Plotting every
+    # row raised KeyError, which inside the watcher meant the curves silently
+    # failed to redraw on every tick of a live run.
+    steps = [row for row in rows if "rollout" in row]
+    if not steps:
+        raise ValueError(f"no completed rollouts in {path} yet "
+                         f"(only events: {sorted({r.get('event') for r in rows})})")
+    return steps
 
 
 def main(argv=None):

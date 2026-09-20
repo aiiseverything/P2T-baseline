@@ -59,14 +59,15 @@ def test_config_rejects_unknown_keys(tmp_path):
 
 def test_shipped_configs_are_valid_and_self_consistent():
     root = Path(__file__).resolve().parents[2]
-    for name in ("smoke10", "formal250"):
+    for name in ("smoke10", "formal250", "p2t-pilot"):
         payload = json.loads((root / "configs" / f"{name}.json").read_text())
-        payload.pop("_comment", None)
-        config = TrainerConfig(**payload).resolved()
-        assert config.push_branch == "p2t-baseline"
+        config = load_config(root / "configs" / f"{name}.json")
+        assert config.push_remote == "p2t-origin" and config.push_branch == "main"
         if name == "smoke10":
             assert config.init_adapter == "", "the smoke must run on the raw base model"
             assert config.rollout_iterations == 10
+        if name == "p2t-pilot":
+            assert config.rollout_iterations == 2 and config.init_adapter
 
 
 # ------------------------------------------------------- end-to-end credit
@@ -334,6 +335,32 @@ def test_train_rollout_runs_one_full_step_and_reports_diagnostics(tmp_path, monk
     assert (trainer.report_dir / "metrics.jsonl").is_file()
 
 
+def test_every_phase_timing_is_reported_and_nonnegative(tmp_path, monkeypatch):
+    """`phase(name, start)` times the work *before* the call, so ordering matters.
+
+    The calls originally ran before the work they named, which shifted every label
+    by one place: `generation_sec` read ~0 while generation's real cost was logged
+    as `reward_model_gradient_sec`.  The run's measured time budget comes from these
+    keys, so a missing or negative one has to fail here.
+    """
+    trainer, fake_batch, fake_score = _stub_trainer(tmp_path)
+    monkeypatch.setattr("p2t.trainer.build_rm_batch", fake_batch)
+    monkeypatch.setattr("p2t.trainer.score_responses", fake_score)
+    metrics = trainer.train_rollout(["p"])
+    for phase in ("generation_sec", "reward_model_gradient_sec", "credit_sec",
+                  "actor_old_logp_sec", "ref_logp_sec", "actor_update_sec",
+                  "logging_sec"):
+        key = f"phase_{phase}"
+        assert key in metrics, f"{key} missing from the step metrics"
+        assert metrics[key] >= 0, f"{key} is negative: {metrics[key]}"
+    # The phases partition the step, so they cannot exceed it by more than the
+    # bookkeeping that runs after `elapsed_sec` is read.
+    total = sum(metrics[f"phase_{p}"] for p in
+                ("generation_sec", "reward_model_gradient_sec", "credit_sec",
+                 "actor_old_logp_sec", "ref_logp_sec", "actor_update_sec"))
+    assert total <= metrics["elapsed_sec"] + 1e-3
+
+
 def test_train_rollout_diagnostics_survive_rectangular_batches(tmp_path, monkeypatch):
     """B != T is the case a broadcast bug hides in: [B,1]*[B] silently becomes [B,B]."""
     trainer, fake_batch, fake_score = _stub_trainer(tmp_path, group_size=3, prompts=2)
@@ -461,6 +488,127 @@ def test_autopush_refuses_oversized_staged_files(tmp_path):
     (repo / "big.bin").write_bytes(b"0" * (51 * 1024 * 1024))
     assert pusher.push(1, {}) is False
     assert "refused_oversized" in (tmp_path / "report" / "git_push.log").read_text()
+
+
+def test_checkpoint_pruning_keeps_only_the_newest(tmp_path):
+    """A 30-hour run needs rollback points, but each checkpoint is ~2 GiB.
+
+    Without pruning, 250 steps at `checkpoint_interval=20` would leave 13 of them
+    on disk.  The newest is always kept, so the final checkpoint is never the one
+    removed.
+    """
+    trainer, _, _ = _stub_trainer(tmp_path)
+    trainer.cfg = type(trainer.cfg)(**{**trainer.cfg.__dict__, "keep_checkpoints": 2})
+    for step in (20, 40, 60):
+        (trainer.output_dir / f"checkpoint-{step}").mkdir(parents=True, exist_ok=True)
+    (trainer.output_dir / "checkpoint-notanumber").mkdir(parents=True, exist_ok=True)
+    trainer._prune_checkpoints()
+    kept = sorted(p.name for p in trainer.output_dir.glob("checkpoint-*"))
+    assert kept == ["checkpoint-40", "checkpoint-60", "checkpoint-notanumber"], \
+        "keep the newest two step-numbered checkpoints, and never touch what is not one"
+
+
+def test_checkpoint_pruning_can_be_disabled(tmp_path):
+    trainer, _, _ = _stub_trainer(tmp_path)
+    trainer.cfg = type(trainer.cfg)(**{**trainer.cfg.__dict__, "keep_checkpoints": 0})
+    for step in (20, 40, 60):
+        (trainer.output_dir / f"checkpoint-{step}").mkdir(parents=True, exist_ok=True)
+    trainer._prune_checkpoints()
+    assert len(list(trainer.output_dir.glob("checkpoint-*"))) == 3
+
+
+def test_formal_config_checkpoints_periodically_for_rollback():
+    """The formal run is ~30 hours; a crash must not cost all of it.
+
+    The interval need not divide the rollout count: `train()` saves a final
+    checkpoint unconditionally after the loop, so step 250 is always captured
+    even though 250 % 20 != 0.  With `keep_checkpoints=2` the run ends holding
+    checkpoint-240 and checkpoint-250.
+    """
+    root = Path(__file__).resolve().parents[2]
+    config = load_config(root / "configs" / "formal250.json")
+    assert config.checkpoint_interval == 20
+    assert config.keep_checkpoints == 2
+    periodic = config.rollout_iterations // config.checkpoint_interval
+    assert periodic >= 10, "a 30-hour run needs many rollback points, not a few"
+
+
+def test_autopush_pushes_a_local_branch_to_a_differently_named_remote_branch(tmp_path):
+    """The work lives on `p2t-baseline`; the dedicated P2T remote takes it as `main`.
+
+    Conflating the two names made `_push_locked` abort with `refused_wrong_branch`
+    on every single step, so the shipped configs could never have pushed anything.
+    The local branch gates committing; the remote name is only a push target.
+    """
+    repo = _git_repo(tmp_path)  # created on p2t-baseline
+    pusher = AutoPusher(enabled=True, every=1, remote="origin", branch="main",
+                        local_branch="p2t-baseline",
+                        report_dir=tmp_path / "report", repo_root=repo)
+    calls = []
+    real_run = pusher._run
+
+    def recording_run(*args, check=True, env=None):
+        calls.append(tuple(args))
+        if args and args[0] == "push":
+            class _Result:
+                returncode, stdout, stderr = 0, "", ""
+            return _Result()
+        return real_run(*args, check=check, env=env)
+
+    pusher._run = recording_run
+    (repo / "new.txt").write_text("change")
+    assert pusher.push(1, {"raw_reward_mean": 1.0}) is True
+    assert ("push", "origin", "p2t-baseline:main") in calls, \
+        "the refspec must name both branches explicitly"
+
+
+def test_autopush_still_refuses_a_branch_the_run_does_not_own(tmp_path):
+    """Splitting the two names must not weaken the guard on the local branch."""
+    repo = _git_repo(tmp_path)  # on p2t-baseline
+    pusher = AutoPusher(enabled=True, every=1, remote="origin", branch="main",
+                        local_branch="some-other-branch",
+                        report_dir=tmp_path / "report", repo_root=repo)
+    (repo / "new.txt").write_text("change")
+    assert pusher.push(1, {}) is False
+    assert "refused_wrong_branch" in (tmp_path / "report" / "git_push.log").read_text()
+
+
+def test_shipped_configs_declare_both_push_branch_names():
+    root = Path(__file__).resolve().parents[2]
+    for name in ("smoke10", "formal250", "p2t-pilot"):
+        config = load_config(root / "configs" / f"{name}.json")
+        assert config.push_branch == "main"
+        assert config.push_local_branch == "p2t-baseline"
+
+
+def test_generation_server_disables_custom_all_reduce_as_an_engine_argument(tmp_path, monkeypatch):
+    """`VLLM_DISABLE_CUSTOM_ALL_REDUCE` does not exist in the installed vLLM.
+
+    Setting it left `disable_custom_all_reduce=False`, the custom all-reduce ran
+    on a PCIe-bridge topology it does not support, a tensor-parallel worker died
+    with a CUDA 'invalid argument' and the engine core never came up.  The
+    setting has to travel as a command-line engine argument.
+    """
+    import p2t.vllm as vllm_module
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, command, env=None, stdout=None, stderr=None):
+            captured["command"] = list(command)
+            captured["env"] = dict(env or {})
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(vllm_module.subprocess, "Popen", _FakePopen)
+    vllm_module.GenerationServer(
+        model="m", tokenizer_source="m", socket_path=tmp_path / "s.sock",
+        gpus=["2", "3"], max_num_seqs=8, seed=0, gpu_memory_utilization=0.85,
+        tensor_parallel_size=2)
+    assert "--disable-custom-all-reduce" in captured["command"]
+    assert "VLLM_DISABLE_CUSTOM_ALL_REDUCE" not in captured["env"], \
+        "the environment variable is unknown to this vLLM and only looks like a guard"
+    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "2,3"
 
 
 def test_autopush_honours_the_interval(tmp_path):

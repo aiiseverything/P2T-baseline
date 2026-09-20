@@ -29,9 +29,9 @@ for long-CoT models. The actor here is `Qwen3-14B-Base` generating with
 `enable_thinking=False`, i.e. the short-CoT regime. The constant is exposed as
 `alpha` in the config and recorded in every run manifest.
 
-Approximation: the vanilla first-order Taylor expansion of Eq. (2). The paper's
-Table 3(g) also reports an integrated-gradients variant (53.8 vs 52.6) but does
-not define its integration path, so it is not implemented. `P2T_APPROXIMATION`
+Approximation: the vanilla first-order Taylor expansion of Eq. (2), the only
+estimator the paper actually defines. See §2.4 for why that is nonetheless a
+deviation from the paper's own headline configuration. `P2T_APPROXIMATION`
 stamps every artifact with `taylor_first_order_eq2`.
 
 ## 2. Where the paper contradicts itself (reproduced, not repaired)
@@ -141,6 +141,39 @@ data, per `docs/results/2026-09-20/main.csv`) are far from the O(1) scale that
 α = 0.1 presumes. That gap is *measured* (σ0, and the reward distribution in
 `metrics.jsonl`) and reported, never corrected.
 
+### 2.4 The paper's headline number uses an estimator it never defines
+
+Table 3(g) reports two attribution estimators: "Vanilla in Eq.(2)" at 52.6 and
+"Integrated in Eq.(4)" at 53.8. The value 53.8 is also what every *other* ablation
+row reports for the default configuration — pad null token in 3(a), ReasonFlux-PRM
+in 3(d), P2T token reward in 3(f). So the paper's default, and therefore its main
+tables, appear to use the **integrated-gradient** estimator, while plain Eq. (2)
+is 1.2 points worse.
+
+The paper never writes that estimator down. Its own cross-reference is broken:
+"Integrated in Eq.(4)" points at the GRPO group-advantage equation, and no
+integration path, baseline or step count appears anywhere in the text. §3.3.1 only
+says the score comes from "the aforementioned vanilla gradient-based approximation
+or the integrated gradient approximation".
+
+We therefore implement Eq. (2) as written. This is the one place where a strict
+reproduction of the paper's *equations* cannot also reproduce the paper's *numbers*,
+and it is recorded rather than guessed at: inventing an integration path would be a
+deviation from the paper dressed up as fidelity. Every artifact is stamped
+`taylor_first_order_eq2` so no result is ever mistaken for the integrated variant.
+
+### 2.5 ω = 0.6 is the stated default but is absent from the ω ablation
+
+§4.1 states "For the hyperparameter ω in Eq. (3), we set ω = 0.6 by default", and
+we use 0.6. But Table 3(b) sweeps ω over {0.25, 0.5, 0.75, 1.0} → {53.5, 53.8,
+53.4, 53.2}: the default value is not in its own ablation grid, and the best grid
+point is 0.5. The table also labels the row "ω in Eq.(5)" although ω appears in
+Eq. (3), matching the mis-numbering in 2.4.
+
+We follow the text (0.6), not the grid, because the text is the explicit statement
+of the default. `omega` is a config field and is recorded in every run manifest,
+so an ω = 0.5 arm is a config change rather than a code change.
+
 ## 3. Structural consequence of a chat-template reward model
 
 Skywork pools its score at the **last valid position** of the canonical chat,
@@ -249,3 +282,241 @@ convention after a resample was undocumented. Both are fixed and pinned.
 Residual, deliberate: `select_training_rollout` places first-pass survivors
 before resampled groups, so a step's prompt order is not always the corpus order.
 Group order inside a rollout changes no group-relative quantity.
+
+## 9. Two defects found by the first launch attempt
+
+Neither is about P2T's mathematics; both would have stopped the run regardless of
+the credit-assignment scheme, and the unit suite was fully green with both present.
+
+### 9.1 The generation server died before step 1
+
+`runs/p2t-pilot/vllm_server.log` records
+
+```
+Failed: Cuda error /workspace/csrc/custom_all_reduce.cuh:164 'invalid argument'
+Worker proc VllmWorker-1 died unexpectedly
+EngineCore failed to start.
+```
+
+and the trainer exited on `vLLM server exited with code 1`.
+
+The L20 is compute capability 8.9 with PCIe-bridge peer-to-peer and no NVLink,
+where vLLM's custom all-reduce is not safe. The code already intended to disable
+it, but did so by exporting `VLLM_DISABLE_CUSTOM_ALL_REDUCE=1` — and the same log
+answers `Unknown vLLM environment variable detected` while the resolved engine
+config still reads `disable_custom_all_reduce=False`. That environment variable
+does not exist in the installed vLLM; `EngineArgs` carries a
+`disable_custom_all_reduce` field instead. The guard was a dead string.
+
+The setting now travels as `--disable-custom-all-reduce` on the server's command
+line into `LLM(...)`, the server prints `custom_all_reduce_disabled=` at startup,
+and it raises if the backend reports the feature still enabled. Two standalone
+probes had reached `vllm_server_ready` on the same two cards, so the fault is
+intermittent rather than deterministic — which is exactly why it is disabled
+outright rather than retried.
+
+### 9.2 No step could ever have pushed
+
+Every shipped config sets `push_branch: "main"`, because the push remote is a
+dedicated P2T repository whose default branch is `main`. `_push_locked` compared
+that name against `git rev-parse --abbrev-ref HEAD`, which is `p2t-baseline` in
+this checkout, and returned `refused_wrong_branch` before staging anything. The
+"push every 5 steps" requirement was inert.
+
+`push_branch` now means the branch **on the remote** and `push_local_branch` the
+branch this checkout must be on; the push uses an explicit
+`p2t-baseline:main` refspec. The guard against committing from an unexpected
+branch is unchanged, and still tested.
+
+### 9.3 Every phase timing was mislabelled by one stage
+
+`phase(name, start)` records the elapsed time *between* `start` and the call, so
+each call has to come **after** the work it names. The first call sat before
+generation, which shifted every label by one position: `generation_sec` reported
+roughly zero, generation's real cost was logged as `reward_model_gradient_sec`,
+the reward model's under `credit_sec`, and so on down the chain. The measured
+time budget is backfilled from these keys, so the numbers were describing the
+wrong stages. All seven calls now follow their work, and
+`test_every_phase_timing_is_reported_and_nonnegative` pins both the key set and
+the constraint that the phases sum to no more than the step.
+
+### 9.4 Verified
+
+The launch that follows these three fixes cleared the pilot's failure point:
+
+```
+custom_all_reduce_disabled=True
+disable_custom_all_reduce=True          # the pilot's log read False here
+vllm_server_ready
+```
+
+with no `Cuda error`, no `died unexpectedly` and no `EngineCore failed to start`.
+Device placement came up as planned: actor ~32 GiB on cuda:0, reward model
+~15 GiB on cuda:1, generation ~38 GiB on each of cuda:2/3 at
+`gpu_memory_utilization=0.85`. Engine init took 136 s of which 66 s was
+compilation, because the compile cache had to be rebuilt (see below).
+
+### 9.5 `ADAPTER_LOAD_FAILED` in the old log was a false alarm
+
+`logs/.adapter_check.log` ends in `ADAPTER_LOAD_FAILED`, which looks like the SFT
+initialisation is unusable. It is not. That check compared the adapter file's key
+set against the in-memory PEFT parameter names, and those two namings differ by
+design: a saved adapter holds `...lora_A.weight` while a mounted adapter holds
+`...lora_A.default.weight`. A raw set difference therefore reports *all* 560
+tensors as simultaneously "missing from model" and "not in adapter", which is
+exactly the symptom in that log, printed next to `all shapes match: True`.
+
+Inspected directly, `models/sft-p2t/adapter_model.safetensors` is healthy:
+
+| property | value |
+|---|---|
+| tensors | 560 (= 40 layers x 7 modules x 2 matrices) |
+| target modules | q/k/v/o/gate/up/down, 80 tensors each |
+| layers covered | 0 - 39, all 40 |
+| `lora_B` magnitude | nonzero (mean abs 6.9e-4) -- trained, not fresh init |
+
+`adapter_config.json` declares r=64, alpha=128, dropout=0, and
+`base_model_name_or_path: models/Qwen3-14B-Base`, so the trainer's
+`_verify_init_adapter` binding check passes and records the weight hash.
+
+One real gap: there is no `sft_manifest.json` beside the adapter. The tokenizer
+protocol assertion in `load_actor_tokenizer` and the full
+`scripts/verify_sft_adapter.py` both key off that file, so neither runs for this
+adapter. The adapter directory also carries no tokenizer export, so the actor
+tokenizer resolves to the base model's -- correct here, but unverified against
+whatever the SFT stage actually used.
+
+### 9.6 `plot_reward.py` crashed on its own metrics file
+
+The trainer writes non-step events to `metrics.jsonl` -- `prompt_filter` is
+emitted before training begins and has no `"rollout"` key. The plotter mapped
+`row["rollout"]` over every row and raised `KeyError`. Because `watch_run.sh`
+redirects the plotter into `health.log`, a live run's curves silently failed to
+redraw on every 300 s tick while the run itself was perfectly healthy.
+`load_metrics` now keeps only rollout rows and says so explicitly when none exist
+yet.
+
+## 10. Environment casualty: the runtime was rebuilt before this run
+
+Between the failed pilot and this run, everything under `/root` was lost. The
+virtual environment survived only in part: its 11 GiB of `site-packages` sits
+under the repository, but `.venv/bin/python` is a symlink into
+`/root/.local/share/uv/python/…`, and both that interpreter and the `uv` binary
+were gone. Every interpreter invocation failed with "No such file or directory"
+even though the path existed, which is the signature of a dangling symlink.
+
+Repair, following `setup_env.sh` rather than improvising: reinstall `uv`,
+`uv python install 3.12`. That recreated `cpython-3.12.14` at the version-generic
+path the symlink targets, so the existing packages were reused as-is — no
+3.1 GiB wheel reinstall. Confirmed afterwards: torch 2.13.0+cu129 with 7 visible
+devices, vLLM 0.28.1rc1.dev199, transformers 5.16.1, peft 0.20.0, and the full
+suite green at 93 passed.
+
+Two casualties are **not** repairable from inside the repository:
+
+* `/root/.cache/vllm` — the torch.compile cache. Costs about 65 s of extra
+  engine init on a cold start; correctness is unaffected.
+* `/root/.p2t-git-credentials` — the push token. `credential.helper` still points
+  at it, so `git push` has no credentials. The remote is reachable and **empty**
+  (`git ls-remote` exits 0 with no refs), so `main` does not exist yet and the
+  refspec would create it. Until the token is restored, every autopush attempt
+  logs `push_failed` in `reports/<run>/git_push.log`; the commits still land
+  locally and nothing is lost but the upload. `_run` now sets
+  `GIT_TERMINAL_PROMPT=0`, which matters specifically because the run is detached
+  and has no terminal: without it git could block waiting for a username that
+  nobody can type.
+
+## 11. Measured cost (10-step smoke, Qwen3-14B-Base, no SFT adapter)
+
+Backfills the plan's estimated budget with what the hardware actually did. Three
+rollouts of 8 prompts x 8 responses = 64 responses, mean 627 response tokens.
+
+| stage | plan estimate | measured (rollout 1) |
+|---|---|---|
+| vLLM generation, 64 responses | 1.5 - 3 min | **1.4 min** (83.7 s) |
+| RM forward + input backward, mb=1 | 2 - 3 min | **0.6 min** (38.3 s) |
+| Eq. (2)-(5) credit | n/a | 0.2 s |
+| actor old logp | 1 - 1.5 min | **1.1 min** (66.7 s) |
+| reference logp (LoRA disabled) | 1 - 1.5 min | **0.9 min** (52.4 s) |
+| actor update, fwd+bwd x64 | 2.5 - 4 min | **3.7 min** (220.3 s) |
+| **total per step** | **8 - 13 min** | **7.7 - 9.9 min** (462 - 595 s) |
+
+The estimate held. The reward model was about 3x faster than assumed; the actor
+update dominates, as expected at microbatch 1 with gradient checkpointing.
+
+Peak memory, against 45.0 GiB usable per L20:
+
+| device | holds | measured peak |
+|---|---|---|
+| cuda:0 | actor bf16 + FP32 head + LoRA + AdamW + activations | **38.6 GiB** |
+| cuda:1 | frozen RM + input-gradient graph | **28.6 GiB** |
+| cuda:2,3 | vLLM TP=2 at `gpu_memory_utilization=0.85` | **38.0 GiB each** |
+
+Two notes for the formal run, which differs from the smoke in ways that move these
+numbers:
+
+* It mounts the SFT adapter **twice** -- `default` (trainable) and `ref` (frozen
+  KL reference) -- where the smoke had one freshly-initialised adapter and used
+  the base model as its reference. That is roughly +0.5 GiB of bf16 weights on
+  cuda:0 on top of a measured 38.6 GiB peak. Headroom is thin but real; it is
+  worth watching rather than assuming.
+* Its `sigma0` is the shared 3.0323 calibrated with the sibling arms, not the
+  smoke's self-calibrated 6.7349. The soft length window is expressed in units of
+  `sigma0`, so the length penalties in the formal run are roughly half the
+  smoke's in absolute reward terms.
+
+Disk: each step writes a 1.0 MiB credit dump plus about 0.25 MiB of prompt/token
+JSON, so 250 steps is about 320 MiB, and `keep_adapters=2` caps the vLLM adapter
+directory at about 2.0 GiB. Against 9.2 TiB free this is not a constraint.
+
+## 12. Checkpoints, and what a restart does and does not preserve
+
+The formal run is ~30 hours, so it checkpoints every 20 rollouts and keeps the
+two most recent (`checkpoint_interval: 20`, `keep_checkpoints: 2`). The interval
+does not divide 250, which is fine: `train()` saves a final checkpoint
+unconditionally after the loop, so a completed run ends holding `checkpoint-240`
+and `checkpoint-250`. Each checkpoint is about 2.0 GiB (LoRA `default` + frozen
+`ref`, plus the tokenizer), so the policy costs 4 GiB steady-state rather than
+the 26 GiB that keeping all thirteen would.
+
+Before this, `checkpoint_interval` was 0 — nothing was written until step 250, so
+a crash at hour 25 would have left only the per-step vLLM adapter snapshots under
+`vllm-adapters/` (themselves pruned to the newest two).
+
+**There is no in-place resume.** `check_fresh_output` refuses to relaunch into a
+used run directory, deliberately: two attempts interleaved in one `metrics.jsonl`
+under duplicated rollout numbers would be unanalysable. What a checkpoint
+supports is *relaunching as a new run seeded from those weights*: point a new
+config's `init_adapter` at the checkpoint directory and give it a fresh
+`output_dir`/`report_dir`. Every checkpoint's `run_manifest.json` now records
+that recipe inline, together with what does not carry over:
+
+* **AdamW moment estimates** are not saved, so the first steps after a restart
+  take a larger effective step than they otherwise would.
+* **The KL reference identity changes.** `beta`-KL is measured against
+  `init_adapter`, so a restart re-anchors the reference to the checkpoint's
+  weights instead of the original SFT initialisation. The restarted segment is
+  therefore not simply a continuation of the same objective.
+* **The prompt cursor resets.** Prompts are walked as
+  `(rollout_index * prompts_per_rollout) % len(prompts)`, so a restart begins
+  again at the start of the corpus and re-trains on prompts the first attempt
+  already saw.
+
+None of this is fatal for a baseline arm, but a restarted run is a different
+experiment from an uninterrupted one and should be reported as such rather than
+spliced into one curve.
+
+### Memory, and the two ways to read it
+
+Actor peak on cuda:0 measured 36.4 GiB via `torch.cuda.max_memory_allocated`
+while `nvidia-smi` showed 39.3 GiB for the same process. The ~3 GiB gap is the
+CUDA context plus memory the caching allocator holds but is not using;
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` reduces fragmentation but does
+not return the reservation. Judge headroom by the logged `actor_peak_gb`, not by
+`nvidia-smi`, or the run looks about 3 GiB closer to the limit than it is.
+
+Activation checkpointing is already enabled (`gradient_checkpointing: true`) and
+the physical microbatch is already 1, so those levers are spent. If
+`actor_peak_gb` ever approaches ~42 GiB the remaining lever is
+`token_chunk_size` (128 -> 64), which trades throughput in
+`selected_logp_from_logits` and `response_entropy` for a smaller transient.

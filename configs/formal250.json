@@ -59,12 +59,14 @@
   "calibration_prompts": 128,
   "degenerate_newline_run": 32,
   "degenerate_penalty": 1.0,
-  "checkpoint_interval": 0,
+  "checkpoint_interval": 20,
+  "keep_checkpoints": 2,
   "token_chunk_size": 128,
   "validation_size": 2000,
   "push_every": 5,
   "push_remote": "p2t-origin",
   "push_branch": "main",
+  "push_local_branch": "p2t-baseline",
   "keep_adapters": 2,
   "policy_head_dtype": "float32"
 }
