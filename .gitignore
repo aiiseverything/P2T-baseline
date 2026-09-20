@@ -14,3 +14,9 @@ datasets/
 .cache/
 .maintenance/
 .mplconfig/
+
+# P2T baseline additions.
+# The CVPR paper and its extracted text stay local: this repository is public.
+paper/
+.setup_*.log
+*.pt

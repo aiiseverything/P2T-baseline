@@ -1,0 +1,70 @@
+{
+  "_comment": "10-step smoke of the P2T baseline on the raw Qwen3-14B-Base weights, with no SFT adapter attached. Every training parameter below is the parent project's protocol (corrected_rl_launcher.common_config), so the only thing that differs from a formal run is the rollout count and the calibration size.",
+
+  "run_name": "smoke10",
+  "model_name": "models/Qwen3-14B-Base",
+  "reward_model_name": "models/Skywork-Reward-V2-Qwen3-8B",
+  "init_adapter": "",
+
+  "output_dir": "runs/smoke10",
+  "report_dir": "reports/smoke10",
+
+  "actor_device": "cuda:0",
+  "reward_device": "cuda:1",
+  "vllm_gpus": ["2", "3"],
+  "vllm_tensor_parallel_size": 2,
+  "vllm_gpu_memory_utilization": 0.85,
+  "vllm_max_num_seqs": 32,
+
+  "seed": 42,
+  "generation_seed": 0,
+
+  "group_size": 8,
+  "prompts_per_rollout": 8,
+  "rollout_iterations": 10,
+  "optimizer_minibatch_responses": 64,
+  "microbatch_responses": 1,
+
+  "max_prompt_tokens": 2048,
+  "max_response_tokens": 2048,
+  "temperature": 1.0,
+  "top_p": 1.0,
+  "top_k": 0,
+  "min_response_tokens": 0,
+
+  "learning_rate": 5e-05,
+  "weight_decay": 0.01,
+  "max_grad_norm": 1.0,
+  "clip_eps": 0.2,
+  "beta": 0.03,
+
+  "lora": true,
+  "lora_r": 64,
+  "lora_alpha": 128,
+  "lora_dropout": 0.0,
+  "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+  "gradient_checkpointing": true,
+
+  "omega": 0.6,
+  "alpha": 0.1,
+  "null_token_id": null,
+
+  "length_threshold_short": 8,
+  "length_threshold_long": 1024,
+  "short_penalty_strength": 0.5,
+  "long_penalty_strength": 2.0,
+  "advantage_std_floor_fraction": 0.5,
+  "sigma0": null,
+  "calibration_prompts": 8,
+  "degenerate_newline_run": 32,
+  "degenerate_penalty": 1.0,
+
+  "checkpoint_interval": 0,
+  "keep_adapters_every": 1,
+  "token_chunk_size": 128,
+  "validation_size": 2000,
+
+  "push_every": 5,
+  "push_remote": "origin",
+  "push_branch": "p2t-baseline"
+}
