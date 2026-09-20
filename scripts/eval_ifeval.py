@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
+from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache, digest,
                                     eval_config, fingerprint, validate_outputs, validate_adapter_base)
 from scripts.eval_policy import resolve_shared_policy, policy_engine_kwargs
 import math
@@ -192,6 +192,8 @@ def run_selftest(args) -> None:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/Qwen3-14B-Base")
+    p.add_argument("--tokenizer", default="",
+                   help="Shared tokenizer source; defaults to saved adapter artifacts or the base model")
     p.add_argument("--adapters", nargs="+", default=[],
                    help="Adapter entries TAG=PATH (or TAG=none for the bare base model)")
     p.add_argument("--dataset", default="datasets/ifeval/ifeval_input_data.jsonl")
@@ -245,15 +247,25 @@ def main():
     # vLLM generation
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
-    from transformers import AutoTokenizer, AutoConfig
+    from transformers import AutoConfig
     from vpo_rm.integration import (checked_sampling_params, sampling_summary,
                                     vllm_support_kwargs)
     from vpo_rm.trainer import VPOTrainer
-    from vpo_rm.token_policy import get_stop_token_ids
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    from vpo_rm.token_policy import (get_stop_token_ids, load_actor_tokenizer,
+                                    resolve_actor_tokenizer_source, tokenize_rendered_prompts)
+    tokenizer_sources = {resolve_actor_tokenizer_source(
+        args.model, '' if path == 'none' else path, args.tokenizer) for _, path in adapters}
+    if len(tokenizer_sources) != 1:
+        raise ValueError('A shared engine requires one tokenizer source; specify --tokenizer')
+    tokenizer_source = tokenizer_sources.pop()
+    tokenizer = load_actor_tokenizer(args.model, tokenizer_name=tokenizer_source)
+    tokenizer_provenance = {'source': tokenizer_source,
+                            'fingerprint': fingerprint(tokenizer_source, full_weights=False)}
     stop_ids = get_stop_token_ids(tokenizer)
     model_fingerprint = fingerprint(args.model, full_weights=False)
     rendered = [VPOTrainer._render_chat_prompt(tokenizer, row["prompt"]) for row in data]
+    prompts = tokenize_rendered_prompts(tokenizer, rendered)
+    prompt_ids = [prompt['prompt_token_ids'] for prompt in prompts]
 
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
@@ -281,6 +293,8 @@ def main():
             config = eval_config(eval_args, recipe, model_fingerprint, adapter_fingerprint,
                                  stop_ids, 'ifeval', support_summary)
             config['policy'] = policies[i]
+            config['tokenizer'] = tokenizer_provenance
+            config['prompt_token_ids_sha256'] = digest(prompt_ids)
             config['engine']['seed'] = engine_seed
             config['scoring'] = {'protocol': 'official_seeded_v1', 'seed': args.scoring_seed,
                                  'langdetect_seed': args.scoring_seed}
@@ -288,7 +302,8 @@ def main():
                 print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
             if llm is None:
-                llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
+                llm = LLM(model=args.model, tokenizer=tokenizer_source,
+              dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
               enable_lora=True, max_lora_rank=64, max_loras=4,
               max_model_len=4096, max_num_seqs=64,
               gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=engine_seed,
@@ -298,8 +313,12 @@ def main():
                 top_k=recipe["top_k"],
                 n=recipe["n"], max_tokens=args.max_tokens, seed=generation_seed,
                 stop_token_ids=list(stop_ids), **support_kwargs)
-            outputs = llm.generate(rendered, params, lora_request=lora)
+            outputs = llm.generate(prompts, params, lora_request=lora)
             validate_outputs(outputs, len(data), recipe['n'])
+            for output, ids in zip(outputs, prompt_ids):
+                echoed = getattr(output, 'prompt_token_ids', None)
+                if echoed is None or list(echoed) != ids:
+                    raise ValueError('vLLM prompt token IDs differ from the rendered chat protocol')
             n_actual = recipe['n']
             # sample-major: responses[s][i] = sample s for prompt i
             responses_by_sample = [[o.outputs[s].text for o in outputs] for s in range(n_actual)]

@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from functools import lru_cache
 import json
+from .token_policy import get_special_token_ids
 
 REWARD_INPUT_PROTOCOL = 'canonical_chat_v1'
 
@@ -10,20 +11,18 @@ def _render(tokenizer, prompt, response_text):
     if not isinstance(prompt, str) or not isinstance(response_text, str):
         raise TypeError('Reward prompt and response must be strings')
     # No generation prefix and no fallback: the checkpoint owns scoring format.
-    rendered = tokenizer.apply_chat_template(
+    return tokenizer.apply_chat_template(
         [{'role': 'user', 'content': prompt},
          {'role': 'assistant', 'content': response_text}],
         tokenize=False, add_generation_prompt=False)
-    bos = getattr(tokenizer, 'bos_token', None)
-    if bos and rendered.startswith(bos):
-        rendered = rendered[len(bos):]
-    return rendered
 
 
 def canonical_reward_input(reward_tokenizer, prompt: str, response_text: str) -> list[int]:
     """Follow the RM model-card full-conversation serialization exactly."""
     rendered = _render(reward_tokenizer, prompt, response_text)
-    ids = list(reward_tokenizer(rendered, add_special_tokens=True)['input_ids'])
+    # Chat templates already contain their own BOS/end markers. Keep that
+    # exact text for byte attribution and do not add a second BOS here.
+    ids = list(reward_tokenizer(rendered, add_special_tokens=False)['input_ids'])
     if not ids or any(type(x) is not int or x < 0 for x in ids):
         raise ValueError('Reward chat must contain valid token IDs')
     return ids
@@ -65,7 +64,7 @@ def _byte_spans(tokenizer, ids, text, *, skip_special_tokens):
     decoder = _byte_decoder(tokenizer)
     if decoder is None:
         return None
-    specials = set(getattr(tokenizer, 'all_special_ids', ()))
+    specials = set(get_special_token_ids(tokenizer))
     added = set(getattr(tokenizer, 'added_tokens_decoder', {}))
     pieces = tokenizer.convert_ids_to_tokens(ids)
     offset, spans, chunks = 0, [], []
@@ -111,22 +110,27 @@ def build_reward_input(actor_tokenizer, reward_tokenizer, prompt: str,
         return RewardInput(canonical, positions, text)
     body_end = len(rendered)-len(suffix) if suffix else len(rendered)
     visible = rendered[len(prefix):body_end]
-    # Qwen templates remove leading newlines. Map only the surviving exact
-    # suffix; other template rewrites remain ordinary GRPO credit.
-    if not text.endswith(visible):
+    # Qwen removes leading newlines; Llama trims whitespace at both ends.
+    # Accept only an unchanged contiguous body with whitespace outside it.
+    # A shortened all-whitespace body has ambiguous source offsets.
+    if not visible or (visible.isspace() and visible != text):
         return RewardInput(canonical, positions, text)
-    removed = text[:len(text)-len(visible)] if visible else text
-    if removed.strip('\n'):
+    body_start = text.find(visible)
+    if body_start < 0:
+        return RewardInput(canonical, positions, text)
+    removed = text[:body_start]
+    if removed.strip() or text[body_start + len(visible):].strip():
         return RewardInput(canonical, positions, text)
     source_spans = _byte_spans(actor_tokenizer, ids, text, skip_special_tokens=True)
     target_spans = _byte_spans(reward_tokenizer, canonical, rendered, skip_special_tokens=False)
     if source_spans is None or target_spans is None:
         return RewardInput(canonical, positions, text)
     trimmed_bytes, prefix_bytes = len(removed.encode()), len(prefix.encode())
+    visible_end = trimmed_bytes + len(visible.encode())
     target = {(span[0], span[1], token): index
               for index, (token, span) in enumerate(zip(canonical, target_spans)) if span}
     for i, (token, span) in enumerate(zip(ids, source_spans)):
-        if span is None or span[0] < trimmed_bytes:
+        if span is None or span[0] < trimmed_bytes or span[1] > visible_end:
             continue
         key = (prefix_bytes + span[0]-trimmed_bytes,
                prefix_bytes + span[1]-trimmed_bytes, token)

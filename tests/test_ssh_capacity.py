@@ -205,3 +205,29 @@ def test_synthetic_rollout_executes_two_real_tiny_vpo_updates_without_sampling_o
 def test_requires_exactly_two_visible_gpus_before_loading(device_count):
     with pytest.raises(RuntimeError, match="two|2"):
         capacity.check_gpu_count(device_count)
+
+
+def test_llama_capacity_counts_native_bos_once_and_builds_full_responses():
+    from pathlib import Path
+    from transformers import AutoTokenizer
+    from vpo_rm.token_policy import configure_model_padding
+    root = Path('/data/VPO-RM/models')
+    actor_path, reward_path = root / 'Llama-3.1-8B-Instruct', root / 'Skywork-Reward-Llama-3.1-8B-v0.2'
+    if not all((path / 'tokenizer.json').exists() for path in (actor_path, reward_path)):
+        pytest.skip('Local Llama tokenizers unavailable')
+    actor = AutoTokenizer.from_pretrained(actor_path, local_files_only=True, padding_side='left')
+    reward = AutoTokenizer.from_pretrained(reward_path, local_files_only=True)
+    configure_model_padding(actor); configure_model_padding(reward)
+    assert capacity.prompt_lengths(actor, reward, 'Say hello.') == (38, 39)
+    trainer = object.__new__(VPOTrainer)
+    trainer.actor_tokenizer, trainer.reward_tokenizer = actor, reward
+    trainer.actor_device = torch.device('cpu')
+    trainer.actor = torch.nn.Linear(1, 1)
+    trainer.cfg = types.SimpleNamespace(group_size=2, max_prompt_tokens=64, max_response_tokens=8)
+    trainer.output_mask = shared_output_mask(actor, 128256)
+    trainer.stop_token_ids = get_stop_token_ids(actor)
+    prompts = capacity.make_synthetic_prompts(actor, reward, count=1, max_prompt_tokens=64)
+    rollout, shape = capacity.build_synthetic_rollout(trainer, prompts)
+    assert shape['actor_prompt_lengths'] == [63] and shape['reward_prompt_lengths'] == [64]
+    assert shape['response_shape'] == [2, 8]
+    assert (rollout[0] == 128000).sum(-1).tolist() == [1, 1]

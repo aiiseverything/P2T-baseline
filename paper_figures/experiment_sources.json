@@ -1,0 +1,17 @@
+{
+  "main_design": "Base → SFT → RL; Instruct → direct RL",
+  "main_arms": [
+    "grpo",
+    "lam4"
+  ],
+  "main_sources": {
+    "Qwen-base": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917",
+    "Qwen-instruct": "/data/VPO-RM/runs/direct-rl-qwen-instruct-formal-20260918/qwen",
+    "Llama-base": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/llama31-base-rl-20260919",
+    "Llama-instruct": "/data/VPO-RM/runs/direct-rl-no-sft-20260918/llama"
+  },
+  "ablation_family": "Qwen3-14B-Base + SFT only",
+  "excluded_from_main": "llama31-rl-canonical-20260918-v3: additional SFT on Instruct",
+  "reward_mean": "RM reward minus soft length penalty",
+  "raw_reward_mean": "Raw RM scalar"
+}

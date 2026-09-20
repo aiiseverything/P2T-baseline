@@ -157,12 +157,12 @@ def load_inputs(questions_path, answers_dir, judgments_dir, judge='gpt-4.1', *,
                 raise ValueError(f'Answer prompt or response mismatch in {path}, uid={uid}')
             _metadata_values(row.get('metadata'))
     custom_run = None
-    if baseline_model != BASELINE:
-        # A new reference requires actual new requests, not relabelled exports.
+    if baseline_model != BASELINE or judge != 'gpt-4.1':
+        # A new reference or judge requires actual new requests, not relabelled exports.
         # Validate the frozen run settings, input identities and each request
         # without calling prepare(), which would create missing provenance.
         from scripts.judge_arena_hard import JudgeRun, load_protocol
-        protocol = load_protocol(upstream, baseline_model=baseline_model)
+        protocol = load_protocol(upstream, baseline_model=baseline_model, judge_model=judge)
         if judge != protocol['judge']:
             raise ValueError('Custom baseline judge does not match the pinned run settings')
         custom_run = JudgeRun(judgments_dir, questions, list(answers[baseline_model].values()),
@@ -356,6 +356,13 @@ def main(argv=None):
                       official_baseline_model=BASELINE, uses_official_baseline=False)
         result['caveats'].append('The selected reference differs from the official o3-mini baseline; '
                                  'these win rates are a custom-baseline evaluation, not official leaderboard scores.')
+    if args.judge != 'gpt-4.1':
+        result.update(protocol=('arena_hard_v2_custom_judge_combined_controls_v1'
+                                if args.baseline_model == BASELINE
+                                else 'arena_hard_v2_custom_judge_custom_baseline_combined_controls_v1'),
+                      official_judge_model='gpt-4.1', uses_official_judge=False)
+        result['caveats'].append('The selected judge differs from the pinned official GPT-4.1 judge; '
+                                 'these win rates use a custom judge and are not official leaderboard scores.')
     stream = io.StringIO()
     columns = ['model', 'raw_weighted_direct_pct', 'raw_official_bootstrap_pct', 'raw_ci90_low_pct',
                'raw_ci90_high_pct', 'length_markdown_controlled_pct', 'controlled_ci90_low_pct',

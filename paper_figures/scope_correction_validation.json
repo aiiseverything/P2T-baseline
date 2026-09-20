@@ -1,0 +1,10 @@
+{
+  "main_curves": 8,
+  "main_rollouts": 2000,
+  "main_init_paths_checked_by_renderer": true,
+  "main_csv_matches_saved_metrics": true,
+  "qwen_base_ablation_curves_including_reused_controls": 5,
+  "ablation_rollouts": 1250,
+  "unique_paper_runs": 11,
+  "historical_llama_sft_runs_excluded": 4
+}

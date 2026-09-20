@@ -18,7 +18,19 @@ CONTROLS = [
 ]
 
 
-def evaluate_quality(responses, baseline_score=None):
+RULES = ('strict', 'final_word')
+
+
+def evaluate_quality(responses, baseline_score=None, *, rule='strict'):
+    """Score the canaries.
+
+    ``strict`` requires the cleaned reply to be the answer. ``final_word`` also
+    accepts a verbose but correct sentence whose last word is the answer
+    ("The capital of France is Paris."), which a lightly SFT-tuned base model
+    produces; empty, repeated or wrong replies still fail under both rules.
+    """
+    if rule not in RULES:
+        raise ValueError(f'Unknown quality rule: {rule}')
     if len(responses) != len(CONTROLS) or any(not isinstance(x, str) for x in responses):
         raise ValueError('Expected exactly eight textual quality-control responses')
     if baseline_score is not None and (type(baseline_score) is not int or not 6 <= baseline_score <= 8):
@@ -31,8 +43,12 @@ def evaluate_quality(responses, baseline_score=None):
         empty = not text.strip()
         repeated = bool(re.search(r'(.{4,}?)\1{3,}', text, re.DOTALL)) or '\n' * 32 in text
         correct = re.fullmatch(control['answer'], clean) is not None
+        final_word = clean.split()[-1] if clean.split() else ''
+        if not correct and rule == 'final_word':
+            correct = re.fullmatch(control['answer'], final_word) is not None
         rows.append({'id': control['id'], 'prompt': control['prompt'], 'response': text,
-                     'correct': correct, 'empty': empty, 'repeated': repeated})
+                     'correct': correct, 'empty': empty, 'repeated': repeated,
+                     'final_word': final_word})
     score = sum(row['correct'] for row in rows)
     minimum = 6 if baseline_score is None else baseline_score - 1
     empty_count = sum(row['empty'] for row in rows)
@@ -40,4 +56,6 @@ def evaluate_quality(responses, baseline_score=None):
     return {'passed': score >= minimum and empty_count == 0 and repeated_count == 0,
             'score': score, 'minimum_score': minimum, 'baseline_score': baseline_score,
             'empty_count': empty_count, 'repeated_count': repeated_count, 'rows': rows,
-            'protocol': 'eight_objective_canaries_v1'}
+            'rule': rule,
+            'protocol': ('eight_objective_canaries_v1' if rule == 'strict'
+                         else 'eight_objective_canaries_v2_final_word')}

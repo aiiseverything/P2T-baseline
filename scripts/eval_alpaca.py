@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache,
+from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache, digest,
                                     eval_config, fingerprint, validate_outputs, validate_adapter_base)
 from scripts.eval_policy import resolve_shared_policy, policy_engine_kwargs
 import math
@@ -111,6 +111,10 @@ def main():
                    help='Read adapter manifests by default; undeclared legacy adapters use native precision')
     p.add_argument("--selftest", action="store_true",
                    help="Run the offline selftest and exit (no GPU)")
+    p.add_argument("--tokenizer", default="",
+                   help="Tokenizer directory that renders the chat prompts, e.g. a saved SFT "
+                        "adapter when the base checkpoint ships without a chat template "
+                        "(default: the model's own tokenizer)")
     args = p.parse_args()
     recipes = [parse_recipe(s) for s in args.recipes]
 
@@ -128,15 +132,26 @@ def main():
 
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
-    from transformers import AutoTokenizer, AutoConfig
+    from transformers import AutoConfig
     from vpo_rm.integration import (checked_sampling_params, sampling_summary,
                                     vllm_support_kwargs)
     from vpo_rm.trainer import VPOTrainer
-    from vpo_rm.token_policy import get_stop_token_ids
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    from vpo_rm.token_policy import (get_stop_token_ids, load_actor_tokenizer,
+                                     resolve_actor_tokenizer_source)
+    tokenizer = load_actor_tokenizer(args.model, tokenizer_name=args.tokenizer)
+    tokenizer_source = resolve_actor_tokenizer_source(args.model, tokenizer_name=args.tokenizer)
     stop_ids = get_stop_token_ids(tokenizer)
     model_fingerprint = fingerprint(args.model, full_weights=False)
+    # Saved SFT tokenizers live beside adapter weights; bind them like every other
+    # evaluation script (content hashes for small files, stat identity for weights).
+    tokenizer_fingerprint = (model_fingerprint
+                             if Path(tokenizer_source).resolve() == Path(args.model).resolve()
+                             else fingerprint(tokenizer_source, full_weights=False))
     rendered = [VPOTrainer._render_chat_prompt(tokenizer, row["instruction"]) for row in data]
+    # The chat template already supplies BOS/control tokens. Explicit IDs keep
+    # vLLM from applying the tokenizer's special-token postprocessor again.
+    prompts = [{"prompt_token_ids": tokenizer.encode(text, add_special_tokens=False)}
+               for text in rendered]
 
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
@@ -161,6 +176,12 @@ def main():
             config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint,
                                  stop_ids, 'alpaca', support_summary)
             config['policy'] = policies[i]
+            config['tokenizer'] = {'source': (model_fingerprint['path']
+                                              if tokenizer_fingerprint is model_fingerprint
+                                              else tokenizer_source),
+                                   'fingerprint': tokenizer_fingerprint}
+            config['prompt_token_ids_sha256'] = digest(
+                [prompt['prompt_token_ids'] for prompt in prompts])
             if cache_matches(manifest, config, [gen_path]):
                 print(f'[{tag}/{rectag}] verified cache, skipping', flush=True)
                 continue
@@ -175,8 +196,11 @@ def main():
                 top_k=recipe["top_k"], n=recipe["n"],
                 max_tokens=args.max_tokens, seed=args.seed,
                 stop_token_ids=list(stop_ids), **support_kwargs)
-            outputs = llm.generate(rendered, params, lora_request=lora)
+            outputs = llm.generate(prompts, params, lora_request=lora)
             validate_outputs(outputs, len(data), recipe['n'])
+            if any(getattr(output, 'prompt_token_ids', None) != prompt['prompt_token_ids']
+                   for output, prompt in zip(outputs, prompts)):
+                raise ValueError('vLLM prompt token IDs differ from the rendered chat protocol')
             n_actual = recipe['n']
 
             rows = generation_rows(data, outputs, n_actual)

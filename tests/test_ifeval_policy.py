@@ -22,23 +22,32 @@ def checkpoint(root, head=None, *, step=False):
 @pytest.fixture
 def cli_stack(tmp_path, monkeypatch):
     from scripts import eval_ifeval
-    constructors, generations = [], []
+    constructors, generations, tokenizer_loads, tokenizations = [], [], [], []
+    controls = SimpleNamespace(echo='same')
 
     class Engine:
         def __init__(self, **kwargs):
             constructors.append(kwargs)
 
         def generate(self, prompts, params, **kwargs):
-            generations.append({'params': params, **kwargs})
-            return [SimpleNamespace(outputs=[SimpleNamespace(
+            generations.append({'params': params, 'prompts': prompts, **kwargs})
+
+            def echoed(prompt):
+                ids = list(prompt['prompt_token_ids']) if isinstance(prompt, dict) else []
+                return None if controls.echo == 'missing' else ([0] + ids if controls.echo == 'extra_bos' else ids)
+
+            return [SimpleNamespace(prompt_token_ids=echoed(prompt), outputs=[SimpleNamespace(
                 text='answer' if sample == 0 else ('capped' if row == 0 else ''),
                 token_ids=[1, 2] if sample == 0 else ([1, 1] if row == 0 else []),
                 finish_reason='stop' if sample == 0 else ('length' if row == 0 else 'stop'),
                 stop_reason=2 if sample == 0 else None,
-            ) for sample in range(params.n)]) for row, _ in enumerate(prompts)]
+            ) for sample in range(params.n)]) for row, prompt in enumerate(prompts)]
 
     class Tokenizer:
+        eos_token = '<eos>'
         eos_token_id = 2
+        bos_token_id = 0
+        chat_template = 'native chat'
         all_special_ids = [2]
 
         def get_vocab(self):
@@ -47,13 +56,23 @@ def cli_stack(tmp_path, monkeypatch):
         def convert_tokens_to_ids(self, token):
             return self.get_vocab().get(token)
 
+        def __call__(self, prompt, *, add_special_tokens):
+            tokenizations.append({'prompt': prompt, 'add_special_tokens': add_special_tokens})
+            # Rendering already supplied the BOS; adding specials would duplicate it.
+            ids = [0, 1, int(prompt.rsplit(' ', 1)[-1]) + 1]
+            return {'input_ids': ([0] + ids) if add_special_tokens else ids}
+
     # Only the external generation stack and unrelated official checker are
     # substituted; main(), policy resolution, cache identity, and writes are real.
     monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(
         LLM=Engine, SamplingParams=lambda **kw: SimpleNamespace(**kw)))
     monkeypatch.setitem(sys.modules, 'vllm.lora.request', SimpleNamespace(LoRARequest=lambda *a: a))
     import transformers
-    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **kw: Tokenizer())
+    def load_tokenizer(source, **kwargs):
+        tokenizer_loads.append({'source': source, **kwargs})
+        return Tokenizer()
+
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', load_tokenizer)
     monkeypatch.setattr(transformers.AutoConfig, 'from_pretrained', lambda *a, **kw: SimpleNamespace(vocab_size=3))
     from vpo_rm.trainer import VPOTrainer
     monkeypatch.setattr(VPOTrainer, '_render_chat_prompt', lambda tok, prompt: prompt)
@@ -80,7 +99,9 @@ def cli_stack(tmp_path, monkeypatch):
         monkeypatch.setattr(sys, 'argv', [*argv, *extra])
         eval_ifeval.main()
 
-    return SimpleNamespace(run=run, output=output, constructors=constructors, generations=generations)
+    return SimpleNamespace(run=run, output=output, model=model, constructors=constructors,
+                           generations=generations, tokenizer_loads=tokenizer_loads,
+                           tokenizations=tokenizations, controls=controls)
 
 
 @pytest.mark.parametrize('step', [False, True])

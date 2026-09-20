@@ -1,0 +1,15 @@
+{
+  "policy": "arena_bounded_connection_recovery_v1",
+  "declared_at": "2026-09-17T14:28:31.810221+00:00",
+  "transport_max_connect_attempts": 4,
+  "allowed_transport_errors": [
+    "ConnectError",
+    "ConnectTimeout"
+  ],
+  "allowed_phase": "Proven TCP/TLS connection failure before application HTTP request headers; no automatic retry after uncertain transmission",
+  "source_sha256": {
+    "resilient_judge.py": "47ad5d71e526c0edbdd207bb7ce664f865c949b565b2c4b5340a461f6e23736f",
+    "source/scripts/judge_arena_hard.py": "0a6c3cd4137fd527e59b0151e73f5f3886b1ed650897d6c487fa087e2c772267"
+  },
+  "proxy": "http://127.0.0.1:17891"
+}

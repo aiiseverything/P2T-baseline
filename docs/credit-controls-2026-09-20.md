@@ -1,0 +1,11 @@
+# Qwen3-14B-Base + SFT + VPO lambda4: new controls
+
+The completed random_direction experiment is displayed as **Random**. Its recorded source name and paths remain unchanged for provenance. It is not a shuffle of RM weights.
+
+**Shuffle** (`credit_source=shuffle`): calculate canonical RM input gradients, full-vocabulary dot-product directions and allocated weights first. Then independently permute the allocated weights within each response across **all valid response positions**, excluding padding. Stop/structural/unmapped positions participate: the allocator first gives them weight one, but those weights move with the permutation. The weight multiset, total, bounds and ESS are preserved exactly. Token advantages receive the same permutation; the original scalar directions stay aligned to the tokens for diagnostic purposes. `randperm` need not be a derangement. An independent seeded generator leaves the policy/global RNG untouched.
+
+**Norm product** (`credit_source=norm_product`): the current mathematical notation is d_t = <g_t,k_t>, where g_t = p_t*(W*f_t - E_p[W*f_t])/sigma and k_t = one_hot(a_t)-p_t. Replace d_t with ||g_t||_2 ||k_t||_2, the Euclidean norms across the full actor vocabulary. This removes gradient alignment (including cosine sign); it is not abs(<g,k>) or an embedding-gradient norm alone. Keep the signed sequence advantage A and the existing centering/scaling, adaptive tau and lambda-band allocator. Thus negative A still reverses the ordering of the new nonnegative signal. Frozen token positions remain unit weights for this arm. Accumulate centered squared gradients directly to avoid subtractive cancellation.
+
+Both controls inherit the canonical lambda4 run's model, protected SFT adapter, dataset/prompt order, seed42, sigma0=3.0323000897825447, optimizer, generation and length settings. The resolved configuration differs only in credit_source and output_dir. Train 250 rollouts with three H200 GPUs per arm and the existing first-two-rollout gate. Frozen sources and configuration checks accompany each run.
+
+Validation includes an independent autograd oracle for the norm-product formula, shuffle multiset and RNG checks, zero-gradient/masked-support tests, real tiny-model optimization on both full and microbatch credit paths, and launcher configuration-diff checks.

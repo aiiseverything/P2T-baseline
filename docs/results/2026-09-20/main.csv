@@ -1,0 +1,15 @@
+Actor,RM,方法,RM-Reward,AlapacaEval,IF-Eval,Arena-Hard
+Qwen3-14B-Base,Skywork-Qwen3-8B,base,-2.537,6.65,38.07,8.42
+Qwen3-14B-Base,Skywork-Qwen3-8B,sft,3.749,7.00,58.52,3.15
+Qwen3-14B-Base,Skywork-Qwen3-8B,grpo,10.870,37.39,59.47,28.49
+Qwen3-14B-Base,Skywork-Qwen3-8B,vpo-lambda(4),13.353,49.57,58.28,39.31
+Qwen3-14B-Instruct,Skywork-Qwen3-8B,base,11.426,63.4,88.03,66.75
+Qwen3-14B-Instruct,Skywork-Qwen3-8B,grpo,13.751,72.8,80.56,73.60
+Qwen3-14B-Instruct,Skywork-Qwen3-8B,vpo-lambda(4),14.433,73.7,82.00,73.16
+Llama-3.1-8B-Base,Skywork-Llama-3.1-8B-v0.2,base,-28.06,0.00,16.4,0.03
+Llama-3.1-8B-Base,Skywork-Llama-3.1-8B-v0.2,sft,-8.08,4.02,42.23,1.24
+Llama-3.1-8B-Base,Skywork-Llama-3.1-8B-v0.2,grpo,4.55,9.73,37.65,2.83
+Llama-3.1-8B-Base,Skywork-Llama-3.1-8B-v0.2,vpo-lambda(4),11.8,12.58,42.18,5.10
+Llama-3.1-8B-Instruct,Skywork-Llama-3.1-8B-v0.2,base,-0.262,11.47,71.06,3.01
+Llama-3.1-8B-Instruct,Skywork-Llama-3.1-8B-v0.2,grpo,19.608,21.61,65.43,8.41
+Llama-3.1-8B-Instruct,Skywork-Llama-3.1-8B-v0.2,vpo-lambda(4),24.726,27.08,75.82,9.35

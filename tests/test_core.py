@@ -296,3 +296,87 @@ def test_credit_scales_bfloat16_policy_logits_in_float32_chunks():
                             token_chunk_size=2, vocab_chunk_size=3, policy_temperature=.7)
     torch.testing.assert_close(actual.direction, expected.direction)
     torch.testing.assert_close(actual.weight, expected.weight)
+
+
+def _random_credit_case():
+    torch.manual_seed(0)
+    a = torch.tensor([1.5, -0.7, 0.0])
+    mask = torch.ones(3, 40, dtype=torch.bool)
+    mask[1, 30:] = False
+    ids = torch.randint(100, 5000, (3, 40))
+    ids[0, -1] = 151643
+    ids[1, 29] = 151645
+    fixed = torch.zeros_like(mask)
+    fixed[0, 3] = True
+    return a, mask, ids, fixed
+
+
+@pytest.mark.parametrize("source", ["random_direction", "random_band"])
+def test_random_credit_keeps_band_budget_freezing_and_sign_without_rm_information(source):
+    from vpo_rm.core import random_credit
+    a, mask, ids, fixed = _random_credit_case()
+    kwargs = dict(credit_lambda=4.0, source=source, token_ids=ids, freeze_stop_tokens=True,
+                  fixed_weight_mask=fixed)
+    credit = random_credit(a, mask, 1.0, generator=torch.Generator().manual_seed(123), **kwargs)
+    w = credit.weight
+    assert w[~mask].eq(0).all()
+    assert float(w[mask].max()) <= 4.0 and float(w[mask].min()) >= 0.25
+    torch.testing.assert_close(w.sum(-1), mask.sum(-1).float())
+    torch.testing.assert_close(credit.advantage.sum(-1) / mask.sum(-1), a)
+    assert torch.sign(credit.advantage[mask]).eq(torch.sign(a)[:, None].expand_as(w)[mask]).all()
+    for row, column in ((0, -1), (1, 29), (0, 3)):
+        assert w[row, column] == pytest.approx(1.0, abs=1e-6)
+    assert torch.equal(w[2], mask[2].float())          # zero advantage: uniform
+    assert float((w[0] - 1).abs().max()) > 0.2         # genuinely non-uniform elsewhere
+    assert float((w[1][mask[1]] - 1).abs().max()) > 0.2
+    again = random_credit(a, mask, 1.0, generator=torch.Generator().manual_seed(123), **kwargs)
+    torch.testing.assert_close(again.weight, w)
+    other = random_credit(a, mask, 1.0, generator=torch.Generator().manual_seed(124), **kwargs)
+    assert not torch.equal(other.weight, w)
+    assert credit.tau_used.shape == (3,) and torch.isfinite(credit.tau_used).all()
+    if source == "random_direction":
+        # The direction is the noise itself; the unchanged allocator reproduces the weights.
+        assert credit.direction[mask].abs().sum() > 0
+        replay = allocate(credit.direction, a, mask, 1.0, credit_lambda=4.0, token_ids=ids,
+                          freeze_stop_tokens=True, fixed_weight_mask=fixed)
+        torch.testing.assert_close(replay.weight, w)
+        torch.testing.assert_close(replay.tau_used, credit.tau_used)
+    else:
+        assert torch.equal(credit.direction, torch.zeros_like(w))
+        assert torch.equal(credit.tau_used, torch.ones(3))
+        free = mask & ~fixed & ~torch.isin(ids, torch.tensor([151643, 151645]))
+        inside = (w > 0.25 + 1e-6) & (w < 4.0 - 1e-6) & free
+        assert inside[0].any() and inside[1].any()
+
+
+def test_random_band_credit_degenerates_to_uniform_at_lambda_one_or_single_free_token():
+    from vpo_rm.core import random_credit
+    a, mask, ids, _ = _random_credit_case()
+    generator = torch.Generator().manual_seed(5)
+    one = random_credit(a, mask, 1.0, credit_lambda=1.0, source="random_band", generator=generator)
+    torch.testing.assert_close(one.weight, mask.float())
+    single = torch.zeros(1, 4, dtype=torch.bool)
+    single[0, :2] = True
+    frozen = torch.zeros_like(single)
+    frozen[0, 0] = True
+    credit = random_credit(torch.tensor([2.]), single, 1.0, credit_lambda=4.0, source="random_band",
+                           generator=generator, fixed_weight_mask=frozen)
+    torch.testing.assert_close(credit.weight, single.float())
+
+
+def test_random_credit_rejects_bad_sources_generators_and_frozen_ids():
+    from vpo_rm.core import random_credit
+    a, mask, ids, _ = _random_credit_case()
+    generator = torch.Generator().manual_seed(1)
+    with pytest.raises(ValueError, match="source"):
+        random_credit(a, mask, 1.0, source="rm_gradient", generator=generator)
+    with pytest.raises(ValueError, match="Generator"):
+        random_credit(a, mask, 1.0, generator=None)
+    with pytest.raises(ValueError, match="advantage"):
+        random_credit(a[:2], mask, 1.0, generator=generator)
+    for source in ("random_direction", "random_band"):
+        with pytest.raises(ValueError, match="token_ids"):
+            random_credit(a, mask, 1.0, source=source, generator=generator, freeze_stop_tokens=True)
+        with pytest.raises(ValueError, match="structural"):
+            random_credit(a, mask, 1.0, source=source, generator=generator, token_ids=ids,
+                          freeze_structural=True)

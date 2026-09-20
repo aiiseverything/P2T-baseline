@@ -1,0 +1,108 @@
+{
+  "status": "passed",
+  "checked_at": "2026-09-20T06:55:18.765860+00:00",
+  "existing_records_preserved": 28340,
+  "new_valid_records": 152,
+  "total_valid_records": 28492,
+  "expected_records": 28500,
+  "remaining_games": [
+    {
+      "model": "qb-lam2",
+      "uid": "f4c2ca7c1ca24433",
+      "order": 1,
+      "category": "hard_prompt",
+      "reason": "length",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qb-lam2/f4c2ca7c1ca24433-1/01/record.json",
+      "record_sha256": "4387c564b56fcaad1d846ccf4caaf3be20a9b422e5151dc0b334a02239858c2e"
+    },
+    {
+      "model": "qb-lam8",
+      "uid": "319cb07279ee434d",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "content_filter",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qb-lam8/319cb07279ee434d-1/01/record.json",
+      "record_sha256": "144260ecb23037064df3e4ad94e312d5adeb20c0a7085865061033c058632d16"
+    },
+    {
+      "model": "lb-grpo",
+      "uid": "319cb07279ee434d",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/lb-grpo/319cb07279ee434d-1/01/record.json",
+      "record_sha256": "316fa16f612dec4e19101333d0e1db78686e0398a6e5db1224643669ad629e4f"
+    },
+    {
+      "model": "li-instruct",
+      "uid": "b39abe255cc64ec5",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/li-instruct/b39abe255cc64ec5-1/01/record.json",
+      "record_sha256": "04f1156bd838c8a462a2ce163f76a7b5010d5f84a475e1f7f45945a08e0b8f87"
+    },
+    {
+      "model": "qi-grpo",
+      "uid": "ba03f38ff6104771",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qi-grpo/ba03f38ff6104771-1/01/record.json",
+      "record_sha256": "b48f23bd8aa116ca8ed4c6982bbcea04faa4f130a01584daae3fa992aecdc9a2"
+    },
+    {
+      "model": "qi-lam4",
+      "uid": "2251874a066b483e",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qi-lam4/2251874a066b483e-1/01/record.json",
+      "record_sha256": "6e6b41f8e886bb1423150191ce1a6fc04880ab95dae2aab876f569355633485f"
+    },
+    {
+      "model": "qi42-grpo",
+      "uid": "ba03f38ff6104771",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qi42-grpo/ba03f38ff6104771-1/01/record.json",
+      "record_sha256": "e917451224a572e571a17a5a6d70f09a7533162141e7a4cac2b1a859f0946dd4"
+    },
+    {
+      "model": "qi42-lam4",
+      "uid": "2251874a066b483e",
+      "order": 1,
+      "category": "creative_writing",
+      "reason": "HTTP 503",
+      "record_path": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/attempts/qi42-lam4/2251874a066b483e-1/01/record.json",
+      "record_sha256": "9c7469b2b341ae3ba7a7a6514c0b36deba121b1073bdf841ebdace280d7c0995"
+    }
+  ],
+  "remaining_reasons": {
+    "length": 1,
+    "content_filter": 1,
+    "HTTP 503": 6
+  },
+  "group_common_valid_questions": {
+    "qb": 748,
+    "lb": 749,
+    "li": 749,
+    "qi42": 748,
+    "qi43": 748
+  },
+  "checks": [
+    "all baseline records unchanged",
+    "all supplemental hashes and parsed verdicts valid",
+    "supplemental requests unchanged except authorized fallback judge",
+    "all scores independently recomputed",
+    "all non-Arena table cells preserved"
+  ],
+  "inputs_sha256": {
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/manifest.json": "5be7c2de156acb8a324513d97af79153ea8851ad046659afad70e177413cd2b1",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round01/result.json": "e9932542a94419526a400dfbd8515f2068cd759e196504a1d46f73e223a9bf28",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/round02/result.json": "6a7c72a857d8d133483523147ee658ab08cb04d083d44cdd1c56ef6b8ae05d47",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/results/summary.json": "f3a7cd13d31d45b68ad4e68a8def2a25d55bafe139c8fa83e2c198fc2c570d73",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/results/game_provenance.jsonl": "0dbc8d90bbf6399dab39f31b25359a20ac764ce6e27cb11ce1ec04bda068fb3a"
+  }
+}

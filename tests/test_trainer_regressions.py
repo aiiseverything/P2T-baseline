@@ -257,6 +257,7 @@ def test_once_sampler_uses_shared_protocol_and_preserves_finish_metadata(tmp_pat
         def __init__(self, **kwargs): captured["engine"] = kwargs
         def generate(self, prompts, params, lora_request):
             captured["params"] = vars(params)
+            captured["prompts"] = prompts
             return [types.SimpleNamespace(outputs=[
                 types.SimpleNamespace(token_ids=[2,3,4,5,6],finish_reason="length",stop_reason=6),
                 types.SimpleNamespace(token_ids=[2,3,4,5,2],finish_reason="length",stop_reason=None)])]
@@ -281,6 +282,7 @@ def test_once_sampler_uses_shared_protocol_and_preserves_finish_metadata(tmp_pat
     assert captured["params"]["min_tokens"]==1
     assert captured["params"]["temperature"]==2.
     assert captured["engine"]["seed"]==7
+    assert captured["prompts"] == [{"prompt_token_ids": [1]}]
 
 
 def test_vllm_protocol_rejects_presence_penalty():

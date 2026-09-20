@@ -97,7 +97,9 @@ def test_observed_socket_runs_quality_before_generation_and_checks_updated_adapt
     controls = ['4', '15', 'Paris', 'H2O', '9', '7', 'A', 'purple']
     checks = WorkerChecks(SimpleNamespace(output_dir=tmp_path / 'report', worker_arm='grpo'))
     checks.trainer = SimpleNamespace(actor_tokenizer=SimpleNamespace(
-        decode=lambda row, **kw: controls[row[0]]), _render_chat_prompt=lambda tok, text: text)
+        decode=lambda row, **kw: controls[row[0]]), _render_chat_prompt=lambda tok, text: text,
+        _encode_prompts=lambda prompts: ({'input_ids': torch.ones((len(prompts), 1), dtype=torch.long),
+            'attention_mask': torch.ones((len(prompts), 1), dtype=torch.long)}, list(prompts)))
     received, compared = [], []
     # Numerical matching has its own tests; this test exercises actual socket
     # ordering, selected-probability transport and quality gating.
@@ -137,6 +139,8 @@ def test_observed_socket_runs_quality_before_generation_and_checks_updated_adapt
     assert compared == [1, 3]
     assert len(received) == 4
     assert received[0]['probe'] and received[2]['probe']
+    assert received[0].get('prompt_token_ids') == [[1]] * 8
+    assert received[2].get('prompt_token_ids') == [[1]] * 8
     assert received[1]['return_logprobs'] and received[3]['return_logprobs']
     assert received[3]['group_size'] == 1 and received[3]['min_tokens'] == 0
     assert checks.report['quality']['before']['score'] == 8
@@ -210,8 +214,29 @@ def test_worker_rejects_wrong_runtime_before_model_loading(tmp_path, monkeypatch
     monkeypatch.setattr(preflight.profile.VPOTrainer, 'from_pretrained', classmethod(forbidden_loading))
     monkeypatch.setattr(preflight.profile, 'main',
                         lambda: preflight.profile.VPOTrainer.from_pretrained(None))
-    args = SimpleNamespace(output_dir=tmp_path / 'arm', project_root=tmp_path,
+    args = SimpleNamespace(experiment_family='qwen', output_dir=tmp_path / 'arm', project_root=tmp_path,
                            runtime_image='test-image', worker_arm='grpo', sigma0=None)
     with pytest.raises(RuntimeError, match='version|runtime|120'):
         preflight.run_worker(args)
     assert not args.output_dir.exists()
+
+
+def test_dry_run_plumbs_profile_arms_capacity_and_quality_rule(tmp_path, capsys, monkeypatch):
+    import json
+    from scripts import preflight_training as preflight, llama_rl_launcher as llama
+    monkeypatch.setattr(llama, 'ACTIVE_PROFILE', 'instruct')
+    common = ['--dry-run', '--output-dir', str(tmp_path / 'out'), '--project-root', str(tmp_path / 'code'),
+              '--runtime-image', 'image', '--experiment-family', 'llama', '--experiment-profile', 'base']
+    preflight.main(common + ['--arms', 'grpo', 'lam4', '--capacity-arm', 'lam4', '--quality-rule', 'final_word'])
+    printed = json.loads(capsys.readouterr().out)
+    assert printed['experiment_profile'] == 'base' and list(printed['arms']) == ['grpo', 'lam4']
+    assert llama.ACTIVE_PROFILE == 'base'
+    lam4 = printed['arms']['lam4']
+    assert lam4[lam4.index('--init-adapter') + 1].endswith('sft-llama31-8b-base-clean2k5e2-20260919')
+    assert lam4[lam4.index('--model') + 1].endswith('/models/Llama-3.1-8B')
+    assert '--freeze-stop-tokens' in lam4 and printed['capacity'].startswith('lam4 ')
+    for bad in (['--arms', 'lam4', 'grpo', '--capacity-arm', 'lam4'],
+                ['--arms', 'grpo', 'lam4', '--capacity-arm', 'lam8'],
+                ['--arms', 'grpo', '--capacity-arm', 'grpo']):
+        with pytest.raises(ValueError, match='arm'):
+            preflight.main(common + bad)

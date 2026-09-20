@@ -1,0 +1,34 @@
+[
+  {
+    "figure": "fig1_reward_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig1b_raw_reward_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig2_length_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig3_kl_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig4_entropy_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig5_allocator_2x2.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig7_qwen_base_ablations.png",
+    "pixel_file_identical": true
+  },
+  {
+    "figure": "fig6_credit_case_heatmaps_paper.png",
+    "pixel_file_identical": true
+  }
+]

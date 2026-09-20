@@ -160,3 +160,115 @@ def test_soft_vpo_updates_actor_and_preserves_frozen_initial_reference(tmp_path)
     assert torch.equal(reference, t.reference_actor.get_output_embeddings().weight)
     assert all(p.grad is None for p in reward.parameters())
     assert torch.isfinite(torch.tensor(metrics["loss"]))
+
+
+@pytest.mark.parametrize("source", ["random_direction", "random_band"])
+def test_soft_vpo_random_credit_ablation_trains_without_rm_gradients(tmp_path, source, monkeypatch):
+    """The ablation keeps the VPO loss, KL, band and budget but draws token weights at random."""
+    from unittest.mock import patch
+    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+    from vpo_rm.reward import LastTokenReward
+    from test_trainer_regressions import fixed_rollout
+
+    class Backbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(8, 4)
+            with torch.no_grad():
+                self.emb.weight.copy_(torch.arange(32).reshape(8, 4) / 32)
+
+        def get_input_embeddings(self):
+            return self.emb
+
+        def forward(self, inputs_embeds, attention_mask, **kwargs):
+            return types.SimpleNamespace(
+                last_hidden_state=(inputs_embeds * attention_mask[..., None]).cumsum(1))
+
+    torch.manual_seed(21)
+    actor = GPTNeoXForCausalLM(GPTNeoXConfig(vocab_size=8, hidden_size=16,
+        intermediate_size=24, num_hidden_layers=1, num_attention_heads=2,
+        max_position_embeddings=32, attention_dropout=0., hidden_dropout=0.))
+    head = nn.Linear(4, 1, bias=False)
+    with torch.no_grad():
+        head.weight.fill_(1.)
+    reward = LastTokenReward(Backbone(), head)
+    cfg = TrainerConfig(actor_device="cpu", reward_device="cpu", allocated_gpu_count=0,
+        output_dir=str(tmp_path), lora=False, gradient_checkpointing=False, group_size=2,
+        max_response_tokens=16, method="vpo_rm", credit_source=source, credit_lambda=4.,
+        freeze_stop_tokens=True, beta=.1, learning_rate=.01,
+        length_reward_mode="soft", length_reward_sigma0=2., long_response_threshold=12)
+    t = VPOTrainer(actor, TinyTokenizer(), reward, TinyTokenizer(), cfg)
+    fixed_rollout(t)
+    before = actor.get_output_embeddings().weight.detach().clone()
+    reference = t.reference_actor.get_output_embeddings().weight.detach().clone()
+    with patch("vpo_rm.trainer.response_reward_gradients",
+               side_effect=AssertionError("random credit must not backpropagate through the RM")):
+        metrics = t.train_rollout(["p"])
+    assert metrics["optimizer_steps"] == 1 and torch.isfinite(torch.tensor(metrics["loss"]))
+    assert not torch.equal(before, actor.get_output_embeddings().weight)
+    assert torch.equal(reference, t.reference_actor.get_output_embeddings().weight)
+    assert all(p.grad is None for p in reward.parameters())
+    assert 0 < metrics["credit_ess_ratio"] <= 1 and metrics["credit_w_max"] <= 4.
+    assert metrics["credit_w_mean"] == pytest.approx(1., abs=1e-5)
+    assert "phase_reward_model_forward_sec" in metrics and "phase_reward_model_gradient_sec" not in metrics
+    dump = torch.load(tmp_path / "rollout-1-credit.pt")
+    assert set(dump) == {"w", "d", "tau"} and dump["w"].shape == dump["d"].shape
+    manifest = json.loads((tmp_path / "rollout-1-rewards.json").read_text())
+    assert len(manifest) == 2
+
+
+@pytest.mark.parametrize("source", ["shuffle", "norm_product"])
+@pytest.mark.parametrize("credit_micro", [0, 1])
+def test_gradient_credit_ablation_runs_real_training(tmp_path, source, credit_micro, monkeypatch):
+    """The ablation keeps the VPO loss, KL, band and budget but draws token weights at random."""
+    from unittest.mock import patch
+    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+    from vpo_rm.reward import LastTokenReward
+    from test_trainer_regressions import fixed_rollout
+
+    class Backbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nn.Embedding(8, 4)
+            with torch.no_grad():
+                self.emb.weight.copy_(torch.arange(32).reshape(8, 4) / 32)
+
+        def get_input_embeddings(self):
+            return self.emb
+
+        def forward(self, inputs_embeds, attention_mask, **kwargs):
+            return types.SimpleNamespace(
+                last_hidden_state=(inputs_embeds * attention_mask[..., None]).cumsum(1))
+
+    torch.manual_seed(21)
+    actor = GPTNeoXForCausalLM(GPTNeoXConfig(vocab_size=8, hidden_size=16,
+        intermediate_size=24, num_hidden_layers=1, num_attention_heads=2,
+        max_position_embeddings=32, attention_dropout=0., hidden_dropout=0.))
+    head = nn.Linear(4, 1, bias=False)
+    with torch.no_grad():
+        head.weight.fill_(1.)
+    reward = LastTokenReward(Backbone(), head)
+    cfg = TrainerConfig(actor_device="cpu", reward_device="cpu", allocated_gpu_count=0,
+        output_dir=str(tmp_path), lora=False, gradient_checkpointing=False, group_size=2,
+        max_response_tokens=16, method="vpo_rm", credit_source=source, credit_lambda=4.,
+        freeze_stop_tokens=True, beta=.1, learning_rate=.01, credit_microbatch_responses=credit_micro,
+        length_reward_mode="soft", length_reward_sigma0=2., long_response_threshold=12)
+    t = VPOTrainer(actor, TinyTokenizer(), reward, TinyTokenizer(), cfg)
+    fixed_rollout(t)
+    before = actor.get_output_embeddings().weight.detach().clone()
+    reference = t.reference_actor.get_output_embeddings().weight.detach().clone()
+    from vpo_rm.trainer import response_reward_gradients
+    with patch("vpo_rm.trainer.response_reward_gradients", wraps=response_reward_gradients) as gradient:
+        metrics = t.train_rollout(["p"])
+        assert gradient.call_count > 0
+    assert metrics["optimizer_steps"] == 1 and torch.isfinite(torch.tensor(metrics["loss"]))
+    assert not torch.equal(before, actor.get_output_embeddings().weight)
+    assert torch.equal(reference, t.reference_actor.get_output_embeddings().weight)
+    assert all(p.grad is None for p in reward.parameters())
+    assert 0 < metrics["credit_ess_ratio"] <= 1 and metrics["credit_w_max"] <= 4.
+    assert metrics["credit_w_mean"] == pytest.approx(1., abs=1e-5)
+    assert "phase_reward_model_gradient_sec" in metrics and "phase_reward_model_forward_sec" not in metrics
+    dump = torch.load(tmp_path / "rollout-1-credit.pt")
+    assert set(dump) == {"w", "d", "tau"} and dump["w"].shape == dump["d"].shape
+    manifest = json.loads((tmp_path / "rollout-1-rewards.json").read_text())
+    assert len(manifest) == 2

@@ -1,0 +1,1396 @@
+{
+  "training_directory": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train",
+  "source_sha256": {
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/profile_manifest.json": "3835e7a63f8d9386150a72548977ab26f1f66a09324853478afb02b6910a16a8",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-1-tokens.json": "aac03667f53ed6d520da8eed78680ed71c6c5c145dbc6b23c5cc2c6c3f8484de",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-1-prompts.json": "795420c7dfb62ff1099bedf74eddb2c318ddc0edd986a4ce674065827ad4c68a",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-1-rewards.json": "44d75ed0dea68b2a728ea9095dfde24b6232cb2ea885c970128a96d32b0eb7bc",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-1-credit.pt": "870fd2e7403edfcb5880fa9500bd4002a6707e807a63ed539263dab068804ed6",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-2-tokens.json": "63485715b83c2565948d6f26ee54f64a8d87fcb3027adead960413c194b32768",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-2-prompts.json": "7a9b590f1f303b8532177eafd9851a331bfd9f48caf6a418bebcb813d424a25a",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-2-rewards.json": "958f3fb6de0cd7ab7a490206a8f06c88dd203180a6a20f32db41ddff4b241d9c",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-2-credit.pt": "4f2b1df6a1c8b6ce5e520f4471c790ba3635b1d171cafeba97d97165cab53b2e",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-3-tokens.json": "9792441635f1383ecb0d994c1fd4f17269af57cce44f7bf3e8abdcd9dc35ef15",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-3-prompts.json": "bc9ee940fb9f6fa29b71331356ef5983484d39beae9fbd7664ccadee8a41f15a",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-3-rewards.json": "fcbcc3e2de7887dbdac82d4efdd67130f0469d1323ab9a4452f1bfaab200dd35",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/rl-fp32-is-canonical-20260917/lam4/train/rollout-3-credit.pt": "4070a59e39ce25062d336e148d04e3537304a0f59dc29f0064d3a8def355d97b",
+    "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/models/Qwen3-14B-Base/tokenizer.json": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+  },
+  "renderer_sha256": "6396d0ca4ce8c464785597818a01c8db9d687c38e3a381e861267d041655cb5f",
+  "rendering": {
+    "figure_width_inches": 7.199999999999999,
+    "figure_height_inches": 5.111111111111111,
+    "png_dpi": 360,
+    "fonts": {
+      "Lato": "/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+      "Liberation Serif": "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+      "Liberation Mono": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"
+    },
+    "palette": [
+      "#fcf8f3",
+      "#f7e8d9",
+      "#f1d1b7",
+      "#e8b08b",
+      "#dc936b",
+      "#ce7853"
+    ],
+    "gamma": 0.5,
+    "color_mapping": "((w - 0.25) / 3.75) ** 0.5",
+    "weight_min": 0.25,
+    "weight_max": 4.0,
+    "normalization": "one fixed scale for every case; no row-wise normalization",
+    "darkest_fill_text_contrast": 4.751527093627492,
+    "token_boxes": [
+      {
+        "case": "terminology",
+        "position": 0,
+        "x": 13.0,
+        "y": 145.036,
+        "width": 16.875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 1,
+        "x": 32.5625,
+        "y": 145.036,
+        "width": 26.375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 2,
+        "x": 61.625,
+        "y": 145.036,
+        "width": 31.9375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 3,
+        "x": 93.5625,
+        "y": 145.036,
+        "width": 2.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 4,
+        "x": 98.9375,
+        "y": 145.036,
+        "width": 9.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 5,
+        "x": 110.6875,
+        "y": 145.036,
+        "width": 22.3125,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 6,
+        "x": 135.6875,
+        "y": 145.036,
+        "width": 44.375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 7,
+        "x": 180.0625,
+        "y": 145.036,
+        "width": 2.0,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 8,
+        "x": 13.0,
+        "y": 161.036,
+        "width": 34.3125,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 9,
+        "x": 50.0,
+        "y": 161.036,
+        "width": 30.625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 10,
+        "x": 80.625,
+        "y": 161.036,
+        "width": 2.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 11,
+        "x": 86.0,
+        "y": 161.036,
+        "width": 14.375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 12,
+        "x": 103.0625,
+        "y": 161.036,
+        "width": 14.4375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 13,
+        "x": 120.1875,
+        "y": 161.036,
+        "width": 4.75,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 14,
+        "x": 127.625,
+        "y": 161.036,
+        "width": 28.75,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 15,
+        "x": 159.0625,
+        "y": 161.036,
+        "width": 28.1875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 16,
+        "x": 13.0,
+        "y": 177.036,
+        "width": 8.4375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 17,
+        "x": 24.125,
+        "y": 177.036,
+        "width": 31.8125,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 18,
+        "x": 58.625,
+        "y": 177.036,
+        "width": 31.1875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 19,
+        "x": 92.5,
+        "y": 177.036,
+        "width": 9.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 20,
+        "x": 104.25,
+        "y": 177.036,
+        "width": 14.4375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 21,
+        "x": 121.375,
+        "y": 177.036,
+        "width": 25.25,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 22,
+        "x": 149.3125,
+        "y": 177.036,
+        "width": 24.0,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "terminology",
+        "position": 23,
+        "x": 173.3125,
+        "y": 177.036,
+        "width": 2.0,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "rainforest",
+        "position": 129,
+        "x": 272.2,
+        "y": 145.036,
+        "width": 16.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 130,
+        "x": 290.95,
+        "y": 145.036,
+        "width": 24.0,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 131,
+        "x": 314.95,
+        "y": 145.036,
+        "width": 3.0,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 132,
+        "x": 320.6375,
+        "y": 145.036,
+        "width": 16.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 133,
+        "x": 340.0125,
+        "y": 145.036,
+        "width": 36.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 134,
+        "x": 378.7625,
+        "y": 145.036,
+        "width": 20.4375,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 135,
+        "x": 399.2,
+        "y": 145.036,
+        "width": 24.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 136,
+        "x": 272.2,
+        "y": 161.036,
+        "width": 14.375,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 137,
+        "x": 289.2625,
+        "y": 161.036,
+        "width": 4.75,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 138,
+        "x": 296.7,
+        "y": 161.036,
+        "width": 19.25,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 139,
+        "x": 318.6375,
+        "y": 161.036,
+        "width": 21.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 140,
+        "x": 342.3875,
+        "y": 161.036,
+        "width": 9.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 141,
+        "x": 354.1375,
+        "y": 161.036,
+        "width": 54.75,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "rainforest",
+        "position": 142,
+        "x": 408.8875,
+        "y": 161.036,
+        "width": 2.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "accountability",
+        "position": 238,
+        "x": 13.0,
+        "y": 269.036,
+        "width": 16.875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 239,
+        "x": 29.875,
+        "y": 269.036,
+        "width": 29.375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 240,
+        "x": 61.9375,
+        "y": 269.036,
+        "width": 30.5625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 241,
+        "x": 95.1875,
+        "y": 269.036,
+        "width": 8.4375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 242,
+        "x": 106.3125,
+        "y": 269.036,
+        "width": 27.0625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 243,
+        "x": 136.0625,
+        "y": 269.036,
+        "width": 55.3125,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 244,
+        "x": 13.0,
+        "y": 285.036,
+        "width": 15.5625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 245,
+        "x": 31.25,
+        "y": 285.036,
+        "width": 61.25,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 246,
+        "x": 92.5,
+        "y": 285.036,
+        "width": 2.0,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 247,
+        "x": 97.1875,
+        "y": 285.036,
+        "width": 15.5625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 248,
+        "x": 115.4375,
+        "y": 285.036,
+        "width": 19.25,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 249,
+        "x": 137.375,
+        "y": 285.036,
+        "width": 21.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 250,
+        "x": 13.0,
+        "y": 301.036,
+        "width": 51.625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 251,
+        "x": 67.3125,
+        "y": 301.036,
+        "width": 12.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 252,
+        "x": 82.6875,
+        "y": 301.036,
+        "width": 19.875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 253,
+        "x": 105.25,
+        "y": 301.036,
+        "width": 30.625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 254,
+        "x": 138.5625,
+        "y": 301.036,
+        "width": 15.5625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 255,
+        "x": 156.8125,
+        "y": 301.036,
+        "width": 40.25,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "accountability",
+        "position": 256,
+        "x": 197.0625,
+        "y": 301.036,
+        "width": 2.6875,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "deduplication",
+        "position": 40,
+        "x": 288.7,
+        "y": 270.364,
+        "width": 22.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 41,
+        "x": 316.2,
+        "y": 270.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 42,
+        "x": 332.7,
+        "y": 270.364,
+        "width": 16.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 43,
+        "x": 354.7,
+        "y": 270.364,
+        "width": 33.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 44,
+        "x": 272.2,
+        "y": 286.364,
+        "width": 38.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 45,
+        "x": 316.2,
+        "y": 286.364,
+        "width": 49.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 46,
+        "x": 371.2,
+        "y": 286.364,
+        "width": 55.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 47,
+        "x": 426.2,
+        "y": 286.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 48,
+        "x": 272.2,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 49,
+        "x": 277.7,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 50,
+        "x": 288.7,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 51,
+        "x": 294.2,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 52,
+        "x": 299.7,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 53,
+        "x": 305.2,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 54,
+        "x": 316.2,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 55,
+        "x": 327.2,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 56,
+        "x": 332.7,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 57,
+        "x": 343.7,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "deduplication",
+        "position": 58,
+        "x": 354.7,
+        "y": 302.364,
+        "width": 5.5,
+        "height": 10.304,
+        "right_boundary": 505.4
+      }
+    ],
+    "peak_boxes": [
+      {
+        "case": "terminology",
+        "position": 6,
+        "x": 135.6875,
+        "y": 145.036,
+        "width": 44.375,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "rainforest",
+        "position": 130,
+        "x": 290.95,
+        "y": 145.036,
+        "width": 24.0,
+        "height": 12.096000000000002,
+        "right_boundary": 505.4
+      },
+      {
+        "case": "accountability",
+        "position": 250,
+        "x": 13.0,
+        "y": 301.036,
+        "width": 51.625,
+        "height": 12.096000000000002,
+        "right_boundary": 246.2
+      },
+      {
+        "case": "deduplication",
+        "position": 56,
+        "x": 332.7,
+        "y": 302.364,
+        "width": 11.0,
+        "height": 10.304,
+        "right_boundary": 505.4
+      }
+    ]
+  },
+  "cases": [
+    {
+      "key": "terminology",
+      "rollout": 1,
+      "row": 48,
+      "kind": "positive",
+      "title": "Refining an imprecise term",
+      "prompt_summary": "What are the lasting legacies of the Greek Empire?",
+      "excerpt": "The Greek Empire, or more accurately, Ancient Greece, has left a lasting legacy in various aspects of our world today.",
+      "advantage": 1.4728648662567139,
+      "reward": 5.5625,
+      "group_rank": 1,
+      "group_size": 8,
+      "prompt": "What are the lasting legacies of the Greek Empire, and how do they continue to shape our world today?",
+      "full_response": "The Greek Empire, or more accurately, Ancient Greece, has left a lasting legacy in various aspects of our world today. Here are some of the significant legacies:\n\n1. Democracy: Ancient Greece is credited with introducing the concept of democracy, which is the foundation of many modern-day governments. Athenian democracy, for instance, involved citizens participating in the decision-making process by voting on important issues.\n\n2. Philosophy: The city of Athens was the birthplace of Western philosophy. Prominent Greek philosophers, such as Socrates, Plato, and Aristotle, have had a significant impact on modern thought and scholarship.\n\n3. Architecture: Greek architecture has been a major influence in Western architecture, with the use of columns, pediments, and friezes being widely recognized. Famous architectural structures like the Parthenon and the Acropolis are key examples of this.\n\n4. Theater: Ancient Greek theatre contributed profoundly to the development of classical theatre. Greek theatre influenced the development of tragedies, comedies, and the concept of using masks, costumes, and scenery.\n\n5. Literature: Greek mythology, which encompasses the stories of gods, heroes, and monsters, has influenced literature and art for centuries. Works by famous Greek writers, such as Homer and Hesiod, continue to be studied and appreciated today.\n\n6. Mathematics and Science: Ancient Greek mathematicians like Euclid and Archimedes made significant contributions to the fields of mathematics and science. Their work laid the foundation for many modern discoveries and advancements in various disciplines.\n\n7. Western Art: Greek art's emphasis on idealized human form and naturalistic representation has influenced Western art through the ages. Famous sculptors like Phidias and Praxiteles created masterpieces that inspired generations of artists.\n\n8. Medical Research: The ancient Greeks made strides in the field of medicine. Physicians like Hippocrates, known as the \"father of medicine,\" established medicine as a distinct discipline.\n\n9. Education: The Greek emphasis on education, particularly in the areas of literature, philosophy, and art, promoted intellectual discussion and critical thinking, influenced by Socrates's method of questioning.\n\n10. Language: Many words and terms from the Greek language have been assimilated into English and other languages, especially in the realm of science, literature, and everyday expressions.\n\nThese legacies continue to shape our world today by influencing our societies, beliefs, educational systems, and various forms of art and literature. They serve as a reminder of the importance of human knowledge and creativity in guiding the development of civilization.<|endoftext|>",
+      "token_start": 0,
+      "token_end_exclusive": 24,
+      "peak_position": 6,
+      "peak_weight": 4.0,
+      "tokens": [
+        {
+          "position": 0,
+          "token_id": 785,
+          "text": "The",
+          "weight": 0.82470703125,
+          "signed_advantage": 1.2146820112830028
+        },
+        {
+          "position": 1,
+          "token_id": 17860,
+          "text": " Greek",
+          "weight": 0.461669921875,
+          "signed_advantage": 0.6799774077371694
+        },
+        {
+          "position": 2,
+          "token_id": 20448,
+          "text": " Empire",
+          "weight": 0.96533203125,
+          "signed_advantage": 1.4218036331003532
+        },
+        {
+          "position": 3,
+          "token_id": 11,
+          "text": ",",
+          "weight": 0.94091796875,
+          "signed_advantage": 1.3858450182015076
+        },
+        {
+          "position": 4,
+          "token_id": 476,
+          "text": " or",
+          "weight": 1.46875,
+          "signed_advantage": 2.1632702723145485
+        },
+        {
+          "position": 5,
+          "token_id": 803,
+          "text": " more",
+          "weight": 0.50927734375,
+          "signed_advantage": 0.7500967067899182
+        },
+        {
+          "position": 6,
+          "token_id": 29257,
+          "text": " accurately",
+          "weight": 4.0,
+          "signed_advantage": 5.8914594650268555
+        },
+        {
+          "position": 7,
+          "token_id": 11,
+          "text": ",",
+          "weight": 1.3310546875,
+          "signed_advantage": 1.9604636842850596
+        },
+        {
+          "position": 8,
+          "token_id": 36950,
+          "text": " Ancient",
+          "weight": 1.2822265625,
+          "signed_advantage": 1.8885464544873685
+        },
+        {
+          "position": 9,
+          "token_id": 24427,
+          "text": " Greece",
+          "weight": 1.16015625,
+          "signed_advantage": 1.7087533799931407
+        },
+        {
+          "position": 10,
+          "token_id": 11,
+          "text": ",",
+          "weight": 0.9765625,
+          "signed_advantage": 1.4383445959538221
+        },
+        {
+          "position": 11,
+          "token_id": 702,
+          "text": " has",
+          "weight": 1.1806640625,
+          "signed_advantage": 1.738958616508171
+        },
+        {
+          "position": 12,
+          "token_id": 2115,
+          "text": " left",
+          "weight": 1.41015625,
+          "signed_advantage": 2.076969596557319
+        },
+        {
+          "position": 13,
+          "token_id": 264,
+          "text": " a",
+          "weight": 1.013671875,
+          "signed_advantage": 1.4930016906000674
+        },
+        {
+          "position": 14,
+          "token_id": 28769,
+          "text": " lasting",
+          "weight": 1.9189453125,
+          "signed_advantage": 2.8263471310492605
+        },
+        {
+          "position": 15,
+          "token_id": 19588,
+          "text": " legacy",
+          "weight": 1.73046875,
+          "signed_advantage": 2.548746624030173
+        },
+        {
+          "position": 16,
+          "token_id": 304,
+          "text": " in",
+          "weight": 1.05859375,
+          "signed_advantage": 1.5591655420139432
+        },
+        {
+          "position": 17,
+          "token_id": 5257,
+          "text": " various",
+          "weight": 0.98876953125,
+          "signed_advantage": 1.456323903403245
+        },
+        {
+          "position": 18,
+          "token_id": 13566,
+          "text": " aspects",
+          "weight": 1.037109375,
+          "signed_advantage": 1.527521960902959
+        },
+        {
+          "position": 19,
+          "token_id": 315,
+          "text": " of",
+          "weight": 0.9873046875,
+          "signed_advantage": 1.4541663865093142
+        },
+        {
+          "position": 20,
+          "token_id": 1039,
+          "text": " our",
+          "weight": 1.7646484375,
+          "signed_advantage": 2.5990886848885566
+        },
+        {
+          "position": 21,
+          "token_id": 1879,
+          "text": " world",
+          "weight": 1.087890625,
+          "signed_advantage": 1.6023158798925579
+        },
+        {
+          "position": 22,
+          "token_id": 3351,
+          "text": " today",
+          "weight": 1.1357421875,
+          "signed_advantage": 1.6727947650942951
+        },
+        {
+          "position": 23,
+          "token_id": 13,
+          "text": ".",
+          "weight": 0.95263671875,
+          "signed_advantage": 1.4031051533529535
+        }
+      ],
+      "saved_weight_dtype": "torch.float16"
+    },
+    {
+      "key": "accountability",
+      "rollout": 2,
+      "row": 18,
+      "kind": "positive",
+      "title": "Giving concrete guidance",
+      "prompt_summary": "How can a company promote transparency and accountability?",
+      "excerpt": "Encourage leaders to model transparency and accountability, and hold them accountable for their actions and decisions.",
+      "advantage": 1.344076156616211,
+      "reward": 19.875,
+      "group_rank": 1,
+      "group_size": 8,
+      "prompt": "In what ways can a company create a culture of transparency and accountability in order to reduce the negative effects of office politics on employee morale and productivity?",
+      "full_response": "Creating a culture of transparency and accountability can significantly help in reducing the negative effects of office politics on employee morale and productivity. Here are some ways a company can achieve this:\n\n1. Establish and communicate clear values and expectations: Clearly articulate the company's values and set expectations for employees to be honest, transparent, and accountable in their work.\n\n2. Encourage open communication: Foster an environment where employees feel comfortable sharing their ideas, concerns, and opinions without fear of retaliation. This can promote healthy discussions and prevent hidden agendas.\n\n3. Facilitate feedback and performance evaluations: Regularly evaluate employees' performance, provide constructive feedback, and recognize their contributions. This helps to identify issues, improve efficiency, and address any conflicts before they escalate.\n\n4. Be open and transparent with decision-making: Involve employees in decision-making processes whenever possible. Share information about company goals, strategies, and challenges, and invite employees to contribute their ideas and suggestions.\n\n5. Address office politics directly: Recognize the presence of office politics and address it head-on. Create a system to discuss and resolve conflicts that may arise from office politics by having open conversations and treating everyone fairly.\n\n6. Promote leadership accountability: Encourage leaders to model transparency and accountability, and hold them accountable for their actions and decisions. This will set the tone for the rest of the company and encourage other employees to follow suit.\n\n7. Monitor progress and address issues: Regularly monitor the progress of projects and initiatives, highlighting successes and addressing setbacks. Any issues that arise should be addressed promptly to maintain trust and accountability.\n\n8. Foster a culture of continuous learning: Emphasize the importance of learning and development, encourage employees to take responsibility for their own growth, and offer opportunities for training and seminars.\n\n9. Implement fair processes: Develop fair processes for promotions, recognizing achievements, and handling grievances. Transparent policies and procedures help eliminate bias and promote equality.\n\n10. Invest in team-building and collaboration: Encourage collaboration among employees by organizing team-building activities and events. This helps to build trust and strengthened relationships, reducing the risk of office politics.\n\nBy implementing these strategies, a company can create a healthy work environment that promotes transparency, accountability, and open communication. This, in turn, can minimize the negative effects of office politics on employee morale and productivity.<|endoftext|>",
+      "token_start": 238,
+      "token_end_exclusive": 257,
+      "peak_position": 250,
+      "peak_weight": 4.0,
+      "tokens": [
+        {
+          "position": 238,
+          "token_id": 10751,
+          "text": " Enc",
+          "weight": 0.9169921875,
+          "signed_advantage": 1.2325073350220919
+        },
+        {
+          "position": 239,
+          "token_id": 60040,
+          "text": "ourage",
+          "weight": 0.9638671875,
+          "signed_advantage": 1.2955109048634768
+        },
+        {
+          "position": 240,
+          "token_id": 6036,
+          "text": " leaders",
+          "weight": 0.89013671875,
+          "signed_advantage": 1.196411539800465
+        },
+        {
+          "position": 241,
+          "token_id": 311,
+          "text": " to",
+          "weight": 0.91748046875,
+          "signed_advantage": 1.2331636222079396
+        },
+        {
+          "position": 242,
+          "token_id": 1614,
+          "text": " model",
+          "weight": 0.79736328125,
+          "signed_advantage": 1.0717169744893909
+        },
+        {
+          "position": 243,
+          "token_id": 27231,
+          "text": " transparency",
+          "weight": 0.85986328125,
+          "signed_advantage": 1.155721734277904
+        },
+        {
+          "position": 244,
+          "token_id": 323,
+          "text": " and",
+          "weight": 0.96875,
+          "signed_advantage": 1.3020737767219543
+        },
+        {
+          "position": 245,
+          "token_id": 38142,
+          "text": " accountability",
+          "weight": 0.9638671875,
+          "signed_advantage": 1.2955109048634768
+        },
+        {
+          "position": 246,
+          "token_id": 11,
+          "text": ",",
+          "weight": 1.0966796875,
+          "signed_advantage": 1.4740210194140673
+        },
+        {
+          "position": 247,
+          "token_id": 323,
+          "text": " and",
+          "weight": 0.89453125,
+          "signed_advantage": 1.202318124473095
+        },
+        {
+          "position": 248,
+          "token_id": 3331,
+          "text": " hold",
+          "weight": 0.9609375,
+          "signed_advantage": 1.2915731817483902
+        },
+        {
+          "position": 249,
+          "token_id": 1105,
+          "text": " them",
+          "weight": 0.9638671875,
+          "signed_advantage": 1.2955109048634768
+        },
+        {
+          "position": 250,
+          "token_id": 35877,
+          "text": " accountable",
+          "weight": 4.0,
+          "signed_advantage": 5.376304626464844
+        },
+        {
+          "position": 251,
+          "token_id": 369,
+          "text": " for",
+          "weight": 0.9658203125,
+          "signed_advantage": 1.2981360536068678
+        },
+        {
+          "position": 252,
+          "token_id": 862,
+          "text": " their",
+          "weight": 0.994140625,
+          "signed_advantage": 1.3362007103860378
+        },
+        {
+          "position": 253,
+          "token_id": 6168,
+          "text": " actions",
+          "weight": 0.96337890625,
+          "signed_advantage": 1.294854617677629
+        },
+        {
+          "position": 254,
+          "token_id": 323,
+          "text": " and",
+          "weight": 0.99755859375,
+          "signed_advantage": 1.3407947206869721
+        },
+        {
+          "position": 255,
+          "token_id": 11181,
+          "text": " decisions",
+          "weight": 0.96337890625,
+          "signed_advantage": 1.294854617677629
+        },
+        {
+          "position": 256,
+          "token_id": 13,
+          "text": ".",
+          "weight": 0.96044921875,
+          "signed_advantage": 1.2909168945625424
+        }
+      ],
+      "saved_weight_dtype": "torch.float16"
+    },
+    {
+      "key": "rainforest",
+      "rollout": 3,
+      "row": 31,
+      "kind": "negative",
+      "title": "Using a misleading category",
+      "prompt_summary": "What physical factors contribute to the Amazon Rainforest's distinct wildlife?",
+      "excerpt": "Tap water: The Amazon Rainforest has a high level of precipitation,",
+      "suffix": " …",
+      "advantage": -1.9361076354980469,
+      "reward": 4.1875,
+      "group_rank": 8,
+      "group_size": 8,
+      "prompt": "What physical factors contribute to the distinct wildlife in the Amazon Rainforest, and what is being done to protect endangered species from habitat loss?",
+      "full_response": "The Amazon Rainforest is home to an incredible diversity of flora and fauna, with more than 400 mammal species, 1,300 bird species, 120 reptile species, 400 amphibian species, and over 60,000 plant species. Several physical factors contribute to the distinct wildlife found in the Amazon Rainforest:\n\n1. Diverse habitats: The Amazon Rainforest has a vast range of habitats, including rivers, lakes, swamps, floodplains, and forest edges, which support a variety of ecosystems and provide diverse ecosystems for different species to thrive.\n2. Tap water: The Amazon Rainforest has a high level of precipitation, with an average of 2000–3000 mm (80–120 inches) per year, which provides an ample source of fresh water for the diverse range of animals and plants found in the rainforest.\n3. Soil and nutrients: The Amazon Rainforest soil is rich in nutrients, which support the growth of diverse flora and fauna.\n4. Temperature: The Amazon Rainforest has a relatively constant warm temperature throughout the year, which allows animals to remain active all year round.\n5. Altitude: The Amazon Rainforest has a wide range of altitudes, with species adapted to different elevations found throughout the region.\n6. Unique adaptations: Over millions of years, animals in the Amazon Rainforest have adapted to the environment and developed unique features to survive, such as camouflage, mimicry, and sharp claws.\n\nTo protect endangered species from habitat loss in the Amazon Rainforest, a range of conservation efforts are underway:\n\n1. Protected areas: Establishing protected areas, such as national parks and wildlife reserves, helps to safeguard habitats and ensure that vulnerable species are not impacted by deforestation and other forms of human intervention.\n2. Protected species: Designating certain species as threatened or endangered can help to raise awareness and direct conservation efforts towards their protection.\n3. Sustainable use: Promoting sustainable use of natural resources, such as through eco-tourism and responsible forest management, can help to balance conservation and economic interests.\n4. Restoration projects: Efforts to restore degraded habitats and reconnect fragmented ecosystems can help to improve the health of the Amazon Rainforest ecosystem.\n5. Education and awareness-raising: Raising public awareness of the importance of the Amazon Rainforest and its biodiversity can help to foster a greater appreciation for conservation efforts and encourage greater public support for their preservation.<|endoftext|>",
+      "token_start": 129,
+      "token_end_exclusive": 143,
+      "peak_position": 130,
+      "peak_weight": 4.0,
+      "tokens": [
+        {
+          "position": 129,
+          "token_id": 36134,
+          "text": " Tap",
+          "weight": 1.0390625,
+          "signed_advantage": -2.0117368400096893
+        },
+        {
+          "position": 130,
+          "token_id": 3015,
+          "text": " water",
+          "weight": 4.0,
+          "signed_advantage": -7.7444305419921875
+        },
+        {
+          "position": 131,
+          "token_id": 25,
+          "text": ":",
+          "weight": 0.78857421875,
+          "signed_advantage": -1.526764566078782
+        },
+        {
+          "position": 132,
+          "token_id": 576,
+          "text": " The",
+          "weight": 0.99267578125,
+          "signed_advantage": -1.921927159652114
+        },
+        {
+          "position": 133,
+          "token_id": 8176,
+          "text": " Amazon",
+          "weight": 0.9990234375,
+          "signed_advantage": -1.9342169053852558
+        },
+        {
+          "position": 134,
+          "token_id": 21911,
+          "text": " Rain",
+          "weight": 1.07421875,
+          "signed_advantage": -2.0798031240701675
+        },
+        {
+          "position": 135,
+          "token_id": 50655,
+          "text": "forest",
+          "weight": 0.9931640625,
+          "signed_advantage": -1.9228725247085094
+        },
+        {
+          "position": 136,
+          "token_id": 702,
+          "text": " has",
+          "weight": 1.0146484375,
+          "signed_advantage": -1.9644685871899128
+        },
+        {
+          "position": 137,
+          "token_id": 264,
+          "text": " a",
+          "weight": 1.005859375,
+          "signed_advantage": -1.9474520161747932
+        },
+        {
+          "position": 138,
+          "token_id": 1550,
+          "text": " high",
+          "weight": 0.9970703125,
+          "signed_advantage": -1.9304354451596737
+        },
+        {
+          "position": 139,
+          "token_id": 2188,
+          "text": " level",
+          "weight": 0.9931640625,
+          "signed_advantage": -1.9228725247085094
+        },
+        {
+          "position": 140,
+          "token_id": 315,
+          "text": " of",
+          "weight": 0.9931640625,
+          "signed_advantage": -1.9228725247085094
+        },
+        {
+          "position": 141,
+          "token_id": 59950,
+          "text": " precipitation",
+          "weight": 1.03515625,
+          "signed_advantage": -2.004173919558525
+        },
+        {
+          "position": 142,
+          "token_id": 11,
+          "text": ",",
+          "weight": 0.99169921875,
+          "signed_advantage": -1.9200364295393229
+        }
+      ],
+      "saved_weight_dtype": "torch.float16"
+    },
+    {
+      "key": "deduplication",
+      "rollout": 1,
+      "row": 45,
+      "kind": "negative",
+      "title": "Producing an invalid string transformation",
+      "prompt_summary": "Remove duplicate characters from QFAWjYIbRIJWvLvKLmdNsW.",
+      "excerpt": "here is the output without duplicate characters:\n\nQFAWjYIKmsNbvmdw",
+      "prefix": "… ",
+      "monospace": true,
+      "reference": "QFAWjYIbRJvLKmdNs",
+      "advantage": -2.161689043045044,
+      "reward": -4.625,
+      "group_rank": 8,
+      "group_size": 8,
+      "prompt": "Given the task definition and input, reply with output. In this task, you are given a string of characters. You need to remove duplicate characters from the string if any, and return the resulting string.\n\nQFAWjYIbRIJWvLvKLmdNsW\n",
+      "full_response": "This code represents the given string, with duplicate characters highlighted:\n\nQFAWjYIbRIJWvLvKLmdNsW\n\nGPT-3 has done a great job, but here is the output without duplicate characters:\n\nQFAWjYIKmsNbvmdw<|endoftext|>",
+      "token_start": 40,
+      "token_end_exclusive": 59,
+      "peak_position": 56,
+      "peak_weight": 4.0,
+      "tokens": [
+        {
+          "position": 40,
+          "token_id": 1588,
+          "text": " here",
+          "weight": 0.85498046875,
+          "signed_advantage": -1.8482019113143906
+        },
+        {
+          "position": 41,
+          "token_id": 374,
+          "text": " is",
+          "weight": 0.8046875,
+          "signed_advantage": -1.7394841518253088
+        },
+        {
+          "position": 42,
+          "token_id": 279,
+          "text": " the",
+          "weight": 0.7001953125,
+          "signed_advantage": -1.5136045350227505
+        },
+        {
+          "position": 43,
+          "token_id": 2550,
+          "text": " output",
+          "weight": 0.8740234375,
+          "signed_advantage": -1.8893668882083148
+        },
+        {
+          "position": 44,
+          "token_id": 2041,
+          "text": " without",
+          "weight": 0.51904296875,
+          "signed_advantage": -1.1220094984164461
+        },
+        {
+          "position": 45,
+          "token_id": 22513,
+          "text": " duplicate",
+          "weight": 1.1826171875,
+          "signed_advantage": -2.5564506163354963
+        },
+        {
+          "position": 46,
+          "token_id": 5766,
+          "text": " characters",
+          "weight": 0.93505859375,
+          "signed_advantage": -2.021305916714482
+        },
+        {
+          "position": 47,
+          "token_id": 1447,
+          "text": ":\n\n",
+          "weight": 0.91845703125,
+          "signed_advantage": -1.9854185009608045
+        },
+        {
+          "position": 48,
+          "token_id": 48,
+          "text": "Q",
+          "weight": 0.93310546875,
+          "signed_advantage": -2.0170838678022847
+        },
+        {
+          "position": 49,
+          "token_id": 3627,
+          "text": "FA",
+          "weight": 1.0556640625,
+          "signed_advantage": -2.2820174370426685
+        },
+        {
+          "position": 50,
+          "token_id": 54,
+          "text": "W",
+          "weight": 0.9365234375,
+          "signed_advantage": -2.02447245339863
+        },
+        {
+          "position": 51,
+          "token_id": 73,
+          "text": "j",
+          "weight": 0.9912109375,
+          "signed_advantage": -2.142689822940156
+        },
+        {
+          "position": 52,
+          "token_id": 56,
+          "text": "Y",
+          "weight": 0.94091796875,
+          "signed_advantage": -2.033972063451074
+        },
+        {
+          "position": 53,
+          "token_id": 28561,
+          "text": "IK",
+          "weight": 1.47265625,
+          "signed_advantage": -3.183424879796803
+        },
+        {
+          "position": 54,
+          "token_id": 1011,
+          "text": "ms",
+          "weight": 1.294921875,
+          "signed_advantage": -2.799218428786844
+        },
+        {
+          "position": 55,
+          "token_id": 45,
+          "text": "N",
+          "weight": 1.162109375,
+          "signed_advantage": -2.512119102757424
+        },
+        {
+          "position": 56,
+          "token_id": 54929,
+          "text": "bv",
+          "weight": 4.0,
+          "signed_advantage": -8.646756172180176
+        },
+        {
+          "position": 57,
+          "token_id": 2277,
+          "text": "md",
+          "weight": 0.58642578125,
+          "signed_advantage": -1.2676701858872548
+        },
+        {
+          "position": 58,
+          "token_id": 86,
+          "text": "w",
+          "weight": 0.97802734375,
+          "signed_advantage": -2.1141909927828237
+        }
+      ],
+      "saved_weight_dtype": "torch.float16"
+    }
+  ],
+  "selection": "Four manually selected illustrative excerpts from the existing candidate pool; not a random sample.",
+  "interpretation": "Color encodes positive credit weights, not token reward labels. The signed learning signal is the saved response advantage multiplied by each weight."
+}

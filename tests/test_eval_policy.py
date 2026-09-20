@@ -83,15 +83,24 @@ def mock_generation_stack(monkeypatch):
             constructors.append(kwargs)
         def generate(self, prompts, params, **kwargs):
             generations.append(kwargs)
-            return [SimpleNamespace(outputs=[SimpleNamespace(
-                text='answer', token_ids=[1, 2], finish_reason='stop', stop_reason=2)]) for _ in prompts]
+            return [SimpleNamespace(prompt_token_ids=(prompt['prompt_token_ids']
+                if isinstance(prompt, dict) else [1]), outputs=[SimpleNamespace(
+                text='answer', token_ids=[1, 2], finish_reason='stop', stop_reason=2)]) for prompt in prompts]
     class Tokenizer:
         eos_token_id = 2
+        eos_token = '<eos>'
+        pad_token = None
+        pad_token_id = None
         all_special_ids = [2]
         def get_vocab(self):
             return {'a': 1, '<eos>': 2}
         def convert_tokens_to_ids(self, token):
             return self.get_vocab().get(token)
+        def encode(self, text, *, add_special_tokens):
+            assert not add_special_tokens
+            return [1]
+        def __call__(self, text, *, add_special_tokens):
+            return {'input_ids': self.encode(text, add_special_tokens=add_special_tokens)}
     monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(
         LLM=Engine, SamplingParams=lambda **kw: SimpleNamespace(**kw)))
     monkeypatch.setitem(sys.modules, 'vllm.lora.request', SimpleNamespace(LoRARequest=lambda *a: a))
@@ -200,7 +209,9 @@ def test_rm_constructor_never_receives_actor_head_override(monkeypatch):
         calls.append(kwargs)
         return Model()
     monkeypatch.setattr(transformers.AutoModelForSequenceClassification, 'from_pretrained', load)
-    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **kw: SimpleNamespace(pad_token_id=0))
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', lambda *a, **kw:
+        SimpleNamespace(pad_token_id=0, pad_token='<pad>', eos_token='<eos>',
+                        get_vocab=lambda: {'<pad>': 0, '<eos>': 2}))
     monkeypatch.setattr(vpo_rm.reward, 'LastTokenReward', lambda *a: Model())
     args = SimpleNamespace(model='actor', rm='reward', policy_head_dtype='float32')
     assert eval_checkpoints.score_all({}, [], [], args) == {}

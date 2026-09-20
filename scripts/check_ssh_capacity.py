@@ -73,7 +73,7 @@ def prompt_lengths(actor_tokenizer, reward_tokenizer, prompt):
     from vpo_rm.reward_inputs import canonical_reward_input
 
     text = VPOTrainer._render_chat_prompt(actor_tokenizer, prompt, tokenize=False)
-    actor_ids = actor_tokenizer(text, add_special_tokens=True)["input_ids"]
+    actor_ids = actor_tokenizer(text, add_special_tokens=False)["input_ids"]
     reward_ids = canonical_reward_input(reward_tokenizer, prompt, "")
     return len(actor_ids), len(reward_ids)
 

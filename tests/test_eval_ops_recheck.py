@@ -152,7 +152,7 @@ def test_checkpoint_reward_rows_use_full_rm_chat_and_remove_actor_special_tokens
 
         def __call__(self, rendered, *, add_special_tokens):
             assert rendered == "<user>a prompt</user><assistant>an answer</assistant>"
-            assert add_special_tokens
+            assert not add_special_tokens
             return {"input_ids": [101, 12, 102, 7, 8, 103]}
 
     assert eval_checkpoints.reward_rows(ActorTokenizer(), RewardTokenizer(), ["a prompt"], [[7, 8, 99]]) == [

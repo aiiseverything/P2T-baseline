@@ -74,3 +74,43 @@ def test_rm_artifact_analysis_uses_the_recorded_tokenizer(tmp_path):
     assert summary["counts"] == {"stop": 1, "structural": 2, "body": 1}
     assert summary["median_abs_d"] == {"stop": 20., "structural": 5., "body": 1.}
     assert summary["decoded_categories"]["body"] == {"3": "ailed"}
+
+
+def test_backend_special_tokens_are_excluded_from_structural_and_content_categories():
+    from types import SimpleNamespace
+    tokenizer = ExampleTokenizer()
+    tokenizer.added_tokens_decoder = {
+        1: SimpleNamespace(special=True), 2: SimpleNamespace(special=False)}
+    classify = getattr(policy(), 'get_special_token_ids', None)
+    assert callable(classify), 'Backend-special classification helper is missing'
+    assert set(classify(tokenizer)) == {0, 1, 3, 4, 11}
+    assert policy().get_structural_token_ids(tokenizer) == (2, 6)
+
+
+def test_saved_tokenizer_export_from_newer_transformers_loads_through_fast_loader(monkeypatch):
+    """A TF5 export names TokenizersBackend; TF4 must load the same saved backend, not the base."""
+    import os
+    from pathlib import Path
+    import pytest
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+    from vpo_rm.token_policy import load_actor_tokenizer
+    adapter = Path(os.environ.get("LLAMA_BASE_SFT_ADAPTER", "/data/VPO-RM/models/sft-llama31-8b-base-clean2k5e2-20260919"))
+    base = Path("/data/VPO-RM/models/Llama-3.1-8B")
+    if not (adapter / "tokenizer_config.json").is_file() or not (base / "tokenizer_config.json").is_file():
+        pytest.skip("Local Llama base SFT export is required")
+    seen = []
+
+    def unresolved(source, *args, **kwargs):
+        seen.append(str(source))
+        raise ValueError("Tokenizer class TokenizersBackend does not exist or is not currently imported.")
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", unresolved)
+    tokenizer = load_actor_tokenizer(str(base), str(adapter))
+    assert seen == [str(adapter)] and isinstance(tokenizer, PreTrainedTokenizerFast)
+    assert (tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id) == (128000, 128001, 128004)
+    assert tokenizer.chat_template and tokenizer.padding_side == "left"
+
+    def other(source, *args, **kwargs):
+        raise ValueError("unrelated failure")
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", other)
+    with pytest.raises(ValueError, match="unrelated"):
+        load_actor_tokenizer(str(base), str(adapter))

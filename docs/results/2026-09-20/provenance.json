@@ -1,0 +1,12 @@
+{
+  "updated_at": "2026-09-20T06:55:18.765860+00:00",
+  "status": "updated_after_missing_recovery_with8_unresolved",
+  "source_results": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/results",
+  "verification": "/mnt/shared-storage-user/ma4agi-gpu/suminle/interests/VPO-RM/runs/arena-missing-recovery-20260920/verification_final.json",
+  "generation_seed": 42,
+  "files_sha256": {
+    "main.csv": "b893874319b9268a389553c30161e4ee9ad75ea017c7accaa9118eb93b880659",
+    "ablation.csv": "f0d08df7c4b09a8269301dee4173c0feb6b149a7057dbc2a04e279fee25e74db",
+    "tables.md": "892510b5721dfc3b900aa7763b3a4bdd6b808b0f91ffdef3b7b7a457a98f1f08"
+  }
+}

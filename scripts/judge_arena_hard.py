@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Official Arena-Hard v2 hard-prompt judging, with durable per-game accounting.
 
-Each request uses GPT-4.1, the pinned official system/template, temperature 0,
+Each request uses GPT-4.1 by default, the pinned official system/template, temperature 0,
 max_tokens 16000, and both answer orders against o3-mini-2025-01-31 by default.
 An explicit --baseline-model selects a separately identified custom reference;
+--judge-model gpt-4o selects a separately identified custom judge.
 the pinned upstream source and default protocol are never rewritten.
 No Alpaca m/M or logprob protocol is used. Only complete, valid two-game pairs
 are exported in official JSONL format; all requests retain separate state.
@@ -36,6 +37,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = "https://api.linkapi.ai/v1"
 JUDGE_MODEL = "gpt-4.1"
+SUPPORTED_JUDGES = (JUDGE_MODEL, "gpt-4o")
 BASELINE_MODEL = "o3-mini-2025-01-31"
 SCORES = frozenset(("A>>B", "A>B", "A=B", "B>A", "B>>A"))
 PATTERNS = [r"\[\[([AB<>=]+)\]\]", r"\[([AB<>=]+)\]"]
@@ -102,21 +104,30 @@ def validate_baseline_model(baseline_model):
     return baseline_model
 
 
-def load_protocol(official_root, baseline_model=BASELINE_MODEL):
+def validate_judge_model(judge_model):
+    require(judge_model in SUPPORTED_JUDGES, "Unsupported judge model identity")
+    return judge_model
+
+
+def load_protocol(official_root, baseline_model=BASELINE_MODEL, *, judge_model=JUDGE_MODEL,
+                  category="hard_prompt"):
     import yaml
     validate_baseline_model(baseline_model)
+    validate_judge_model(judge_model)
     official_root = Path(official_root)
     config_path = official_root / "config/arena-hard-v2.0.yaml"
     settings_path = official_root / "utils/judge_utils.py"
     config = yaml.safe_load(config_path.read_text())
-    settings = runpy.run_path(str(settings_path))["JUDGE_SETTINGS"]["hard_prompt"]
+    require(category in ("hard_prompt", "creative_writing"), "Unsupported Arena category")
+    settings = runpy.run_path(str(settings_path))["JUDGE_SETTINGS"][category]
+    official_baseline = BASELINE_MODEL if category == "hard_prompt" else "gemini-2.0-flash-001"
     require(config["judge_model"] == JUDGE_MODEL and config["temperature"] == 0.0
             and config["max_tokens"] == 16000 and config["reference"] is None
-            and config["regex_patterns"] == PATTERNS and settings["baseline"] == BASELINE_MODEL,
+            and config["regex_patterns"] == PATTERNS and settings["baseline"] == official_baseline,
             "Unexpected pinned official judge protocol")
     protocol = {
         "protocol": "arena_hard_v2_gpt41_two_order_v1",
-        "judge": JUDGE_MODEL, "baseline": baseline_model,
+        "judge": judge_model, "baseline": baseline_model,
         "temperature": 0.0, "max_tokens": 16000,
         "system_prompt": settings["system_prompt"], "prompt_template": config["prompt_template"],
         "regex_patterns": config["regex_patterns"], "base_url": BASE_URL,
@@ -124,9 +135,16 @@ def load_protocol(official_root, baseline_model=BASELINE_MODEL):
                           for name in ("config/arena-hard-v2.0.yaml", "utils/judge_utils.py", "gen_judgment.py")},
         "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
-    if baseline_model != BASELINE_MODEL:
+    if category != "hard_prompt":
+        protocol["category"] = category
+    if baseline_model != official_baseline:
         protocol.update(protocol="arena_hard_v2_gpt41_two_order_custom_baseline_v1",
-                        official_baseline_model=BASELINE_MODEL, uses_official_baseline=False)
+                        official_baseline_model=official_baseline, uses_official_baseline=False)
+    if judge_model != JUDGE_MODEL:
+        protocol.update(protocol=("arena_hard_v2_custom_judge_two_order_v1"
+                                  if baseline_model == official_baseline
+                                  else "arena_hard_v2_custom_judge_two_order_custom_baseline_v1"),
+                        official_judge_model=JUDGE_MODEL, uses_official_judge=False)
     return protocol
 
 
@@ -146,7 +164,8 @@ def make_request(question, baseline, answer, order, protocol):
     require(order in (0, 1), "Invalid answer order")
     first, second = (baseline, answer) if order == 0 else (answer, baseline)
     return {
-        "model": JUDGE_MODEL, "temperature": protocol["temperature"], "max_tokens": protocol["max_tokens"],
+        "model": validate_judge_model(protocol["judge"]),
+        "temperature": protocol["temperature"], "max_tokens": protocol["max_tokens"],
         "messages": [
             {"role": "system", "content": protocol["system_prompt"]},
             {"role": "user", "content": protocol["prompt_template"].format(
@@ -156,8 +175,8 @@ def make_request(question, baseline, answer, order, protocol):
     }
 
 
-def indexed(rows, label):
-    require(len(rows) == 500, f"{label}: expected exactly 500 rows")
+def indexed(rows, label, expected_count=500):
+    require(len(rows) == expected_count, f"{label}: expected exactly {expected_count} rows")
     result = {}
     for row in rows:
         uid = row.get("uid")
@@ -168,7 +187,7 @@ def indexed(rows, label):
 
 
 def validate_answers(rows, questions, label, model=None):
-    answers = indexed(rows, label)
+    answers = indexed(rows, label, len(questions))
     require(set(answers) == set(questions), f"{label}: uid coverage mismatch")
     models = set()
     for uid, answer in answers.items():
@@ -236,15 +255,29 @@ class JudgeRun:
         self.directory = Path(output_dir)
         self.protocol = protocol
         self.baseline_model = validate_baseline_model(protocol.get("baseline"))
-        if self.baseline_model != BASELINE_MODEL:
-            require(protocol.get("protocol") == "arena_hard_v2_gpt41_two_order_custom_baseline_v1"
-                    and protocol.get("official_baseline_model") == BASELINE_MODEL
+        self.judge_model = validate_judge_model(protocol.get("judge"))
+        category = protocol.get("category", "hard_prompt")
+        require(category in ("hard_prompt", "creative_writing"), "Unsupported Arena category")
+        count = 250 if category == "creative_writing" else 500
+        official_baseline = BASELINE_MODEL if category == "hard_prompt" else "gemini-2.0-flash-001"
+        if self.judge_model != JUDGE_MODEL:
+            expected = ("arena_hard_v2_custom_judge_two_order_v1" if self.baseline_model == official_baseline
+                        else "arena_hard_v2_custom_judge_two_order_custom_baseline_v1")
+            require(protocol.get("protocol") == expected
+                    and protocol.get("official_judge_model") == JUDGE_MODEL
+                    and protocol.get("uses_official_judge") is False,
+                    "A custom judge must use an explicitly identified custom protocol")
+        if self.baseline_model != official_baseline:
+            expected = ("arena_hard_v2_gpt41_two_order_custom_baseline_v1" if self.judge_model == JUDGE_MODEL
+                        else "arena_hard_v2_custom_judge_two_order_custom_baseline_v1")
+            require(protocol.get("protocol") == expected
+                    and protocol.get("official_baseline_model") == official_baseline
                     and protocol.get("uses_official_baseline") is False,
                     "Custom baseline must use an explicitly identified custom protocol")
-        self.questions = indexed(questions, "questions")
-        require(all(q.get("category") == "hard_prompt" and isinstance(q.get("prompt"), str)
-                    and q["prompt"].strip() for q in questions), "Only 500 nonempty hard_prompt questions are accepted")
-        require(len({q["prompt"] for q in questions}) == 500, "Duplicate question prompts")
+        self.questions = indexed(questions, "questions", count)
+        require(all(q.get("category") == category and isinstance(q.get("prompt"), str)
+                    and q["prompt"].strip() for q in questions), "Wrong category or empty question prompt")
+        require(len({q["prompt"] for q in questions}) == count, "Duplicate question prompts")
         self.baseline = validate_answers(baseline, self.questions, "baseline", self.baseline_model)
         require(isinstance(answers, dict) and bool(answers), "No candidate answers")
         self.answers = {}
@@ -296,10 +329,13 @@ class JudgeRun:
         require(record.get("tag") == tag and record.get("uid") == uid and record.get("order") == order
                 and record.get("request") == request and record.get("request_sha256") == digest(request),
                 f"Saved game identity mismatch: {tag}/{uid}/{order}")
-        if self.baseline_model != BASELINE_MODEL:
+        if self.baseline_model != BASELINE_MODEL or self.judge_model != JUDGE_MODEL:
             require(record.get("baseline_model") == self.baseline_model
                     and record.get("protocol_sha256") == digest(self.protocol),
                     f"Saved custom-baseline game identity mismatch: {tag}/{uid}/{order}")
+        if self.judge_model != JUDGE_MODEL:
+            require(record.get("judge_model") == self.judge_model,
+                    f"Saved custom-judge game identity mismatch: {tag}/{uid}/{order}")
         require(record.get("status") in ("inflight", "ambiguous", "invalid", "valid"), "Unknown game state")
         if record["status"] == "valid":
             require(record.get("score") in SCORES
@@ -338,8 +374,10 @@ class JudgeRun:
         record = {"tag": tag, "uid": uid, "order": order, "status": "inflight", "started_at": now(),
                   "local_request_id": str(uuid.uuid4()), "request": request, "request_sha256": digest(request),
                   "attempt": 1 if retry else 0}
-        if self.baseline_model != BASELINE_MODEL:
+        if self.baseline_model != BASELINE_MODEL or self.judge_model != JUDGE_MODEL:
             record.update(baseline_model=self.baseline_model, protocol_sha256=digest(self.protocol))
+        if self.judge_model != JUDGE_MODEL:
+            record["judge_model"] = self.judge_model
         if retry:
             record["supersedes_local_request_id"] = previous["local_request_id"]
         atomic_json(path, record)
@@ -358,7 +396,7 @@ class JudgeRun:
                 pair = [self.load_record(tag, uid, order) for order in (0, 1)]
                 if not all(record and record["status"] == "valid" for record in pair):
                     continue
-                rows.append({"uid": uid, "category": question["category"], "judge": JUDGE_MODEL,
+                rows.append({"uid": uid, "category": question["category"], "judge": self.judge_model,
                              "model": answers[uid]["model"], "baseline": self.baseline_model,
                              "games": [{"score": r["score"], "judgment": {"answer": r["answer"]},
                                         "prompt": r["request"]["messages"]} for r in pair]})
@@ -471,9 +509,12 @@ class JudgeRun:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--questions", type=Path, required=True)
+    parser.add_argument("--category", choices=("hard_prompt", "creative_writing"), default="hard_prompt")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--baseline-model", default=BASELINE_MODEL,
                         help="Exact reference model identity; changing it creates a custom-baseline protocol")
+    parser.add_argument("--judge-model", default=JUDGE_MODEL, choices=SUPPORTED_JUDGES,
+                        help="Judge model identity; changing it creates a custom-judge protocol")
     parser.add_argument("--answers-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tags", nargs="+", required=True)
@@ -499,7 +540,8 @@ def main():
         pieces = spec.split(":")
         require(len(pieces) == 3 and pieces[2] in ("0", "1"), "retry-game must be TAG:UID:0 or TAG:UID:1")
         retries.append((pieces[0], pieces[1], int(pieces[2])))
-    protocol = load_protocol(args.official_root, baseline_model=args.baseline_model)
+    protocol = load_protocol(args.official_root, baseline_model=args.baseline_model, judge_model=args.judge_model,
+                             category=args.category)
     run = JudgeRun(args.output_dir, load_jsonl(args.questions), load_jsonl(args.baseline),
                    {tag: load_jsonl(args.answers_dir / f"{tag}.jsonl") for tag in args.tags}, protocol)
     uids = json.loads(args.uids_file.read_text()) if args.uids_file else args.uids

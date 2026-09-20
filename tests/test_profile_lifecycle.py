@@ -19,6 +19,29 @@ def test_profile_provenance_binds_reward_implementations_and_protocol():
         assert manifest['source_sha256'][name] == hashlib.sha256((profile.ROOT / name).read_bytes()).hexdigest()
 
 
+def test_resolved_profile_rejects_changed_physical_reward_microbatch(tmp_path, monkeypatch):
+    from dataclasses import replace
+    original = profile.TrainerConfig.resolved
+    monkeypatch.setattr(profile.TrainerConfig, 'resolved',
+                        lambda self: replace(original(self), microbatch_responses=2))
+    args = profile.parse_args(['--output-dir', str(tmp_path)])
+    with pytest.raises(ValueError, match='microbatch'):
+        profile.build_trainer_config(args, tmp_path)
+
+
+def test_profile_rejects_actual_trainer_microbatch_before_calibration(tmp_path, monkeypatch):
+    args = profile.parse_args(['--output-dir', str(tmp_path)])
+    monkeypatch.setattr(profile, 'parse_args', lambda: args)
+    monkeypatch.setattr(profile, 'vllm_subprocess_environment', lambda *a: dict(os.environ))
+    monkeypatch.setattr(profile.torch.cuda, 'device_count', lambda: 3)
+    monkeypatch.setattr(profile.torch.cuda, 'manual_seed_all', lambda seed: None)
+    monkeypatch.setattr(profile, 'load_prompt_dataset', lambda *a, **k: (['p'] * 8, [], {}))
+    monkeypatch.setattr(profile.VPOTrainer, 'from_pretrained',
+                        lambda config: SimpleNamespace(cfg=SimpleNamespace(microbatch_responses=2)))
+    with pytest.raises(ValueError, match='microbatch'):
+        profile.main()
+
+
 @pytest.mark.parametrize('checker', ['scripts/preflight_training.py',
                                     'scripts/preflight_quality.py',
                                     'scripts/check_ssh_capacity.py'])
@@ -110,7 +133,8 @@ def test_sigterm_during_startup_runs_server_group_cleanup(monkeypatch, tmp_path)
     monkeypatch.setattr(profile.torch.cuda, 'get_device_name', lambda i: 'test-device')
     monkeypatch.setattr(profile, 'vllm_subprocess_environment', lambda *a: dict(os.environ))
     monkeypatch.setattr(profile, 'load_prompt_dataset', lambda *a, **k: (['p'] * 8, [], {}))
-    fake = SimpleNamespace(filter_prompts=lambda values: values, filtered_prompt_count=0,
+    fake = SimpleNamespace(cfg=SimpleNamespace(microbatch_responses=1),
+                           filter_prompts=lambda values: values, filtered_prompt_count=0,
                            sampling_manifest=lambda: {},
                            actor=SimpleNamespace(save_pretrained=lambda path: path.mkdir()))
     monkeypatch.setattr(profile.VPOTrainer, 'from_pretrained', lambda config: fake)
@@ -141,3 +165,20 @@ def test_sigterm_during_startup_runs_server_group_cleanup(monkeypatch, tmp_path)
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
+
+
+def test_profile_provenance_binds_llama_launcher_and_protocol_checker(tmp_path, monkeypatch):
+    for name in profile.profile_source_manifest()['source_sha256']:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((profile.ROOT / name).read_bytes())
+    names = ('scripts/llama_rl_launcher.py', 'scripts/check_llama_protocol.py')
+    for name in names:
+        (tmp_path / name).write_text('# independent Llama validation\n')
+    monkeypatch.setattr(profile, 'ROOT', tmp_path)
+    before = profile.profile_source_manifest()['source_sha256']
+    assert all(name in before for name in names)
+    for name in names:
+        (tmp_path / name).write_text('# changed validation\n')
+    after = profile.profile_source_manifest()['source_sha256']
+    assert all(before[name] != after[name] for name in names)

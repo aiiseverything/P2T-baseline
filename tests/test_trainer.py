@@ -31,7 +31,8 @@ class _Score(nn.Module):
 
 def _trainer(method):
     t = object.__new__(VPOTrainer)
-    t.cfg = types.SimpleNamespace(method=method, microbatch_responses=1)
+    t.cfg = types.SimpleNamespace(method=method, microbatch_responses=1,
+                                  max_prompt_tokens=2048, max_response_tokens=2048)
     t.reward_device = torch.device("cpu")
     t.actor_tokenizer = t.reward_tokenizer = _Tok()
     t.reward = LastTokenReward(_Backbone(), _Score())
@@ -77,3 +78,47 @@ def test_chunked_old_logp_matches_dense_masked_reference():
         got = t._old_logp_microbatch(actor_inputs, actor_inputs.bool(), torch.zeros_like(ids), ids, valid)
     dense = logits.gather(-1, ids[..., None]).squeeze(-1) - logits.logsumexp(-1)
     torch.testing.assert_close(got, dense)
+
+
+def test_random_credit_ablation_reward_is_forward_only_but_keeps_the_canonical_mapping():
+    responses = torch.tensor([[3, 4, 0], [5, 6, 0]])
+    valid = torch.tensor([[True, True, False], [True, True, False]])
+    dummy = torch.zeros((2, 5), dtype=torch.long)
+    mask = torch.ones_like(dummy)
+    positions = torch.tensor([[2, 3, -1], [2, 3, -1]])
+    torch.manual_seed(7)
+    vpo = _trainer("vpo_rm")
+    vpo_scores, vpo_grads, *_ = vpo._reward_batch(dummy, mask, positions, responses, valid, ["a", "b"])
+    for source in ("random_direction", "random_band"):
+        torch.manual_seed(7)
+        ablation = _trainer("vpo_rm")
+        ablation.cfg.credit_source = source
+        with patch("vpo_rm.trainer.response_reward_gradients",
+                   side_effect=AssertionError("random credit must not backpropagate through the RM")):
+            scores, grads, *_ = ablation._reward_batch(dummy, mask, positions, responses, valid, ["a", "b"])
+        torch.testing.assert_close(scores, vpo_scores)
+        assert grads is None and vpo_grads is not None
+        assert torch.equal(ablation._reward_fixed_weight_mask, vpo._reward_fixed_weight_mask)
+        assert ablation._reward_alignment_stats == vpo._reward_alignment_stats
+        assert all(p.grad is None for p in ablation.reward.parameters())
+
+
+def test_random_credit_sources_are_validated_and_reach_the_profile_config():
+    import pytest
+    from vpo_rm.trainer import TrainerConfig
+    from scripts.profile_vllm_full import parse_args, build_trainer_config
+    assert TrainerConfig().resolved().credit_source == "rm_gradient"
+    for source in ("random_direction", "random_band"):
+        assert TrainerConfig(method="vpo_rm", credit_source=source).resolved().credit_source == source
+        with pytest.raises(ValueError, match="vpo_rm"):
+            TrainerConfig(method="grpo", credit_source=source).resolved()
+    with pytest.raises(ValueError, match="credit_source"):
+        TrainerConfig(credit_source="uniform").resolved()
+    args = parse_args(["--output-dir", "x", "--method", "vpo_rm", "--credit-lambda", "4",
+                       "--credit-source", "random_band", "--credit-microbatch-responses", "1",
+                       "--length-reward-mode", "soft", "--length-reward-sigma0", "3.0"])
+    config = build_trainer_config(args, "x")
+    assert config.credit_source == "random_band" and config.method == "vpo_rm"
+    assert parse_args(["--output-dir", "x"]).credit_source == "rm_gradient"
+    with pytest.raises(SystemExit):
+        parse_args(["--output-dir", "x", "--credit-source", "uniform"])

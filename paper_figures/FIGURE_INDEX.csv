@@ -1,0 +1,9 @@
+figure,description,data
+fig1_reward_2x2,Length-adjusted training reward,rl_metrics_2x2.csv
+fig1b_raw_reward_2x2,Raw RM score,rl_metrics_2x2.csv
+fig2_length_2x2,Response length,rl_metrics_2x2.csv
+fig3_kl_2x2,KL to initialization,rl_metrics_2x2.csv
+fig4_entropy_2x2,Token entropy,rl_metrics_2x2.csv
+fig5_allocator_2x2,Credit ESS and weight spread,rl_metrics_2x2.csv
+fig7_qwen_base_ablations,Lambda and random-direction ablations,rl_metrics_qwen_base_ablation.csv
+fig6_credit_case_heatmaps_paper,Four-case token credit heatmap,fig6_credit_case_heatmaps_paper.json

@@ -1,5 +1,9 @@
 # 实验控制源码归档
 
+2026-09-20 更新：主目录 `scripts/`、`vpo_rm/`、`tests/` 已合并 Llama / direct-RL、GPT-4o 判分恢复、creative250 和 credit 消融的工作目录改动；保留原 Arena 子模块版本。新增归档包括 GPT-4o 排除/恢复测试所需的冻结控制源码，以及 `runs/direct-rl-qwen-instruct-v3-20260918/source/` 中 Qwen 官方 posttrained actor 的专用 launcher、preflight、storage 和测试。实际正式启动入口保留在 `runs/direct-rl-qwen-instruct-formal-20260918/`，其 README 明确记录当时跳过 GPU preflight 的运行方式。
+
+Qwen 专用冻结 launcher 与通用 `scripts/direct_rl_launcher.py` 不应互换；冻结版本保留了原始模型身份、哈希和运行约束。归档文件只用于源码审计，恢复旧任务还需要原 manifest、校准、模型及未归档依赖。最新结果见 [2026-09-20 快照](project-status-2026-09-20.md)，完整论文图表与可移植画图入口见 [paper_figures](../paper_figures/README.md)。
+
 常规训练与评测入口位于 `scripts/` 和 `vpo_rm/`。本次提交另外保留选定 `runs/` 目录中的实验控制脚本、冻结源码、测试及说明，路径不变，便于核对实际运行版本。完整文件清单及 SHA256 见 [归档清单](experiment-source-manifest.json)。
 
 | 目录 | 归档内容 |

@@ -21,6 +21,10 @@ from scripts.eval_artifacts import (atomic_text, cache_matches, commit_cache, di
                                     validate_adapter_base, validate_outputs)
 from scripts.eval_policy import policy_engine_kwargs, resolve_shared_policy
 
+GENERATION_SOURCES = ('scripts/eval_alpaca.py', 'scripts/eval_policy.py',
+                      'third_party/arena_hard/gen_answer.py',
+                      'third_party/arena_hard/utils/add_markdown_info.py')
+
 
 def read_jsonl(path):
     # splitlines() also splits U+2028/U+0085 inside valid JSON string literals.
@@ -45,13 +49,15 @@ def style_metadata(text):
         upstream.remove_pattern(text, re.compile('```([^`]*)```')), suffix='')
 
 
-def validate_questions(rows, expected_count=500):
+def validate_questions(rows, expected_count=500, category='hard_prompt'):
+    if category not in ('hard_prompt', 'creative_writing'):
+        raise ValueError('Unsupported Arena category')
     if not isinstance(rows, list) or len(rows) != expected_count or not rows:
         raise ValueError(f'Expected exactly {expected_count} hard questions')
     seen = set()
     for row in rows:
         if (not isinstance(row, dict) or not isinstance(row.get('uid'), str) or not row['uid']
-                or row['uid'] in seen or row.get('category') != 'hard_prompt'
+                or row['uid'] in seen or row.get('category') != category
                 or not isinstance(row.get('prompt'), str) or not row['prompt'].strip()):
             raise ValueError('Questions require unique uid, hard_prompt category and nonempty prompt')
         seen.add(row['uid'])
@@ -104,21 +110,55 @@ def _summary(rows, answer_path, manifest_path):
             'n_empty': sum(not r['messages'][-1]['content']['answer'].strip() for r in rows)}
 
 
+def engine_arguments(args, head, tokenizer_source):
+    """Shared vLLM engine identity; prompts are explicit IDs, the tokenizer only detokenizes."""
+    return dict(model=args.model, tokenizer=tokenizer_source, dtype='bfloat16', trust_remote_code=True,
+        generation_config='vllm', enable_lora=True, max_lora_rank=64, max_loras=1,
+        max_model_len=args.max_model_len, max_num_seqs=getattr(args, 'max_num_seqs', 32),
+        gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed,
+        **policy_engine_kwargs(head))
+
+
+def generation_config(args, tag, adapter_fingerprint, policy, engine_kwargs, *, model_fingerprint,
+                      tokenizer_provenance, stop_ids, support_summary, prompt_ids, runtime=None):
+    """Cache identity of one answer file; offline callers supply the GPU runtime versions."""
+    recipe = {'temp': 1.0, 'n': 1, 'top_p': 1.0, 'top_k': -1}
+    config = eval_config(args, recipe, model_fingerprint, adapter_fingerprint, stop_ids,
+                         'arena_hard', support_summary)
+    config.update(model_tag=tag, policy=policy, engine=dict(engine_kwargs),
+                  tokenizer=dict(tokenizer_provenance), prompt_token_ids_sha256=digest(prompt_ids),
+                  style_protocol='arena_hard_v2_gpt4o_upstream_v1')
+    config['runtime_versions'] = (runtime_versions(('transformers', 'vllm', 'tiktoken', 'pandas'))
+                                  if runtime is None else dict(runtime))
+    for source in GENERATION_SOURCES:
+        config['sources'][source] = file_hash(ROOT / source)
+    return config
+
+
 def generate_all(args):
     """Evaluate all args.adapters sequentially in one lazy engine; never judge."""
     adapters = parse_adapters(args.adapters)
     head, policies = resolve_shared_policy([path for _, path in adapters], args.policy_head_dtype)
     if args.max_tokens < 1 or args.max_model_len < 1 or getattr(args, 'max_num_seqs', 32) < 1:
         raise ValueError('Token/context budgets and max_num_seqs must be positive')
-    questions = validate_questions(read_jsonl(args.dataset))
+    category = getattr(args, 'category', 'hard_prompt')
+    questions = validate_questions(read_jsonl(args.dataset),
+                                  250 if category == 'creative_writing' else 500, category)
     for _, path in adapters:
         validate_adapter_base(path, args.model)
 
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoConfig
     from vpo_rm.integration import checked_sampling_params, sampling_summary, vllm_support_kwargs
-    from vpo_rm.token_policy import get_stop_token_ids
+    from vpo_rm.token_policy import (get_stop_token_ids, load_actor_tokenizer,
+                                     resolve_actor_tokenizer_source)
     from vpo_rm.trainer import VPOTrainer
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    # A base checkpoint without a chat template renders with its saved SFT tokenizer,
+    # exactly as the RL rollouts did; the model's own tokenizer remains the default.
+    tokenizer_name = getattr(args, 'tokenizer', '') or ''
+    tokenizer = load_actor_tokenizer(args.model, tokenizer_name=tokenizer_name)
+    tokenizer_source = resolve_actor_tokenizer_source(args.model, tokenizer_name=tokenizer_name)
+    tokenizer_provenance = {'source': tokenizer_source,
+                            'fingerprint': fingerprint(tokenizer_source, full_weights=False)}
     stop_ids = get_stop_token_ids(tokenizer)
     if not stop_ids:
         raise ValueError('No registered EOS/stop tokens for actor')
@@ -131,27 +171,16 @@ def generate_all(args):
     support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
     support_summary = sampling_summary(support_kwargs)
     model_fingerprint = fingerprint(args.model, full_weights=False)
-    recipe = {'temp': 1.0, 'n': 1, 'top_p': 1.0, 'top_k': -1}
-    engine_kwargs = dict(model=args.model, dtype='bfloat16', trust_remote_code=True,
-        generation_config='vllm', enable_lora=True, max_lora_rank=64, max_loras=1,
-        max_model_len=args.max_model_len, max_num_seqs=getattr(args, 'max_num_seqs', 32),
-        gpu_memory_utilization=0.80, tensor_parallel_size=1, seed=args.seed,
-        **policy_engine_kwargs(head))
+    engine_kwargs = engine_arguments(args, head, tokenizer_source)
     plans = []
     # Validate every existing cache before allocating a GPU engine or overwriting anything.
     for i, (tag, path) in enumerate(adapters):
         answer_path = Path(args.output) / 'model_answer' / f'{tag}.jsonl'
         manifest_path = Path(args.output) / 'manifests' / f'{tag}.json'
-        config = eval_config(args, recipe, model_fingerprint,
-            None if path == 'none' else fingerprint(path), stop_ids, 'arena_hard', support_summary)
-        config.update(model_tag=tag, policy=policies[i], engine=engine_kwargs,
-                      prompt_token_ids_sha256=digest(prompt_ids),
-                      style_protocol='arena_hard_v2_gpt4o_upstream_v1')
-        config['runtime_versions'] = runtime_versions(('transformers', 'vllm', 'tiktoken', 'pandas'))
-        for source in ('scripts/eval_alpaca.py', 'scripts/eval_policy.py',
-                       'third_party/arena_hard/gen_answer.py',
-                       'third_party/arena_hard/utils/add_markdown_info.py'):
-            config['sources'][source] = file_hash(ROOT / source)
+        config = generation_config(args, tag, None if path == 'none' else fingerprint(path),
+            policies[i], engine_kwargs, model_fingerprint=model_fingerprint,
+            tokenizer_provenance=tokenizer_provenance, stop_ids=stop_ids,
+            support_summary=support_summary, prompt_ids=prompt_ids)
         cached = cache_matches(manifest_path, config, [answer_path])
         if cached:
             validate_answers(read_jsonl(answer_path), questions, tag)
@@ -201,6 +230,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', default='models/Qwen3-14B-Base')
     parser.add_argument('--dataset', required=True, help='Exactly 500 hard_prompt JSONL rows')
+    parser.add_argument('--category', choices=('hard_prompt', 'creative_writing'), default='hard_prompt')
     parser.add_argument('--output', required=True)
     parser.add_argument('--adapters', nargs='+', required=True, help='TAG=PATH; base=none')
     parser.add_argument('--max-tokens', type=int, default=4096)
@@ -208,6 +238,10 @@ def main():
     parser.add_argument('--max-num-seqs', type=int, default=32)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--policy-head-dtype', choices=('auto', 'native', 'float32'), default='float32')
+    parser.add_argument('--tokenizer', default='',
+                        help='Tokenizer directory that renders the chat prompts, e.g. a saved SFT '
+                             'adapter when the base checkpoint ships without a chat template '
+                             "(default: the model's own tokenizer)")
     generate_all(parser.parse_args())
 
 

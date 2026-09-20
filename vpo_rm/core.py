@@ -181,6 +181,131 @@ def allocate(direction: Tensor, advantage: Tensor, response_mask: Tensor,
     return Credit(token_advantage, d, weight, tau_used)
 
 
+RANDOM_CREDIT_SOURCES = ("random_direction", "random_band")
+GRADIENT_CREDIT_SOURCES = ("rm_gradient", "shuffle", "norm_product")
+CREDIT_SOURCES = GRADIENT_CREDIT_SOURCES + RANDOM_CREDIT_SOURCES
+
+
+@torch.no_grad()
+def shuffle_credit(credit: Credit, response_mask: Tensor, *, generator: torch.Generator) -> Credit:
+    """Permute allocated weights within each complete response, excluding padding.
+
+    All valid positions participate, including stops/structure/unmapped tokens:
+    their unit weights were fixed during allocation, but their locations are
+    deliberately randomized by this control. Preserve the weight multiset and
+    the signed token-advantage multiset exactly. Directions stay at source tokens.
+    """
+    mask = _mask(response_mask)
+    if credit.weight.shape != mask.shape or credit.advantage.shape != mask.shape:
+        raise ValueError("Credit and response mask must share shape [B,T]")
+    weight = torch.zeros_like(credit.weight)
+    advantage = torch.zeros_like(credit.advantage)
+    for row in range(mask.shape[0]):
+        positions = mask[row].nonzero(as_tuple=True)[0]
+        order = torch.randperm(positions.numel(), device=mask.device, generator=generator)
+        weight[row, positions] = credit.weight[row, positions[order]]
+        advantage[row, positions] = credit.advantage[row, positions[order]]
+    return Credit(advantage, credit.direction, weight, credit.tau_used)
+
+
+def _frozen_positions(mask: Tensor, token_ids: Tensor | None, freeze_stop_tokens: bool,
+                      freeze_structural: bool, stop_token_ids, structural_token_ids,
+                      fixed_weight_mask: Tensor | None) -> Tensor:
+    """Positions whose credit stays exactly one; mirrors ``allocate`` without touching it."""
+    if fixed_weight_mask is not None:
+        if (not isinstance(fixed_weight_mask, Tensor) or fixed_weight_mask.shape != mask.shape
+                or fixed_weight_mask.dtype != torch.bool or fixed_weight_mask.device != mask.device):
+            raise ValueError("fixed_weight_mask must be boolean [B,T] on the credit device")
+        if (fixed_weight_mask & ~mask).any():
+            raise ValueError("fixed_weight_mask may select valid response tokens only")
+    if freeze_stop_tokens or freeze_structural:
+        if token_ids is None:
+            raise ValueError("freeze_stop_tokens/freeze_structural requires token_ids")
+        if token_ids.shape != mask.shape or token_ids.dtype != torch.long or token_ids.device != mask.device:
+            raise ValueError("token_ids must be int64 [B,T] on the credit device")
+    if freeze_structural and structural_token_ids is None:
+        raise ValueError("freeze_structural requires verified structural_token_ids")
+    frozen = torch.zeros_like(mask) if fixed_weight_mask is None else fixed_weight_mask.clone()
+    if freeze_stop_tokens or freeze_structural:
+        stop_ids = (151643, 151645) if stop_token_ids is None else stop_token_ids
+        ids = tuple(stop_ids) + (tuple(structural_token_ids) if freeze_structural else ())
+        if ids:
+            frozen |= torch.isin(token_ids, torch.as_tensor(ids, device=mask.device)) & mask
+    return frozen
+
+
+@torch.no_grad()
+def random_credit(advantage: Tensor, response_mask: Tensor, tau: float,
+                  credit_lambda: float = 2.0, *, generator: torch.Generator,
+                  source: str = "random_direction",
+                  token_ids: Tensor | None = None,
+                  freeze_stop_tokens: bool = False,
+                  freeze_structural: bool = False,
+                  stop_token_ids: tuple[int, ...] | None = None,
+                  structural_token_ids: tuple[int, ...] | None = None,
+                  fixed_weight_mask: Tensor | None = None) -> Credit:
+    """Ablation control: credit inside the same lambda band without reward-model information.
+
+    ``random_direction`` replaces the RM-gradient direction d_t by i.i.d. standard
+    normal noise and runs the unchanged allocator: per-response standardization,
+    adaptive tau, the [1/lambda, lambda] band, frozen stop/structural/unmapped
+    tokens at exactly one, and the preserved response budget. ``random_band``
+    draws free-token weights uniformly inside the band and projects them onto
+    the response budget by alternating budget shifts with band clipping. Both
+    keep the sequence advantage's sign and mean; the returned direction is the
+    noise (or zeros) so credit dumps document the control.
+    """
+    if source not in RANDOM_CREDIT_SOURCES:
+        raise ValueError(f"random credit source must be one of {RANDOM_CREDIT_SOURCES}")
+    mask = _mask(response_mask)
+    if not isinstance(generator, torch.Generator) or generator.device != mask.device:
+        raise ValueError("random credit requires a torch.Generator on the credit device")
+    if advantage.shape != (mask.shape[0],) or advantage.device != mask.device:
+        raise ValueError("Expected advantage [B] on the credit device")
+    if source == "random_direction":
+        direction = torch.randn(mask.shape, generator=generator, device=mask.device, dtype=torch.float32)
+        return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
+                        token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens,
+                        freeze_structural=freeze_structural, stop_token_ids=stop_token_ids,
+                        structural_token_ids=structural_token_ids, fixed_weight_mask=fixed_weight_mask)
+    if not math.isfinite(tau) or tau <= 0 or tau > torch.finfo(torch.float32).max:
+        raise ValueError("tau must be finite, positive and representable in float32")
+    if not math.isfinite(credit_lambda) or credit_lambda < 1:
+        raise ValueError("credit_lambda must be finite and at least one")
+    a = advantage.float()
+    if not torch.isfinite(a).all():
+        raise ValueError("Valid credit advantages must be finite")
+    frozen = _frozen_positions(mask, token_ids, freeze_stop_tokens, freeze_structural,
+                               stop_token_ids, structural_token_ids, fixed_weight_mask)
+    free = mask & ~frozen
+    counts = free.sum(-1, keepdim=True).float()
+    low, high = 1.0 / credit_lambda, float(credit_lambda)
+    weight = torch.empty(mask.shape, device=mask.device, dtype=torch.float32)
+    weight.uniform_(low, high, generator=generator)
+    weight = weight.masked_fill(~free, 0.)
+    converged = counts.squeeze(-1) == 0
+    for _ in range(256):
+        total = weight.sum(-1, keepdim=True)
+        shift = ((counts - total) / counts.clamp_min(1)).masked_fill(counts == 0, 0.)
+        weight = (weight + shift).clamp(low, high).masked_fill(~free, 0.)
+        converged = torch.isclose(weight.sum(-1), counts.squeeze(-1), rtol=1e-7, atol=1e-6)
+        if bool(converged.all()):
+            break
+    if not bool(converged.all()):
+        raise ValueError("Random band credit did not reach the response budget inside the lambda band")
+    weight = weight.masked_fill(frozen, 1.)
+    # A zero advantage or a single free token admits only the uniform allocation.
+    uniform = (a == 0) | (counts.squeeze(-1) < 2)
+    weight = torch.where(uniform[:, None], mask.float(), weight)
+    valid_min = weight.masked_fill(~mask, torch.inf).amin(-1)
+    if not bool(((weight.amax(-1) <= high) & (valid_min >= low) & torch.isfinite(weight).all(-1)).all()):
+        raise ValueError("Final credit weights violate the lambda band")
+    if not torch.allclose(weight.sum(-1), mask.sum(-1).float(), rtol=2e-6, atol=2e-6):
+        raise ValueError("Final credit weights do not preserve the response budget")
+    tau_used = torch.full_like(a, max(tau, torch.finfo(torch.float32).tiny))
+    return Credit(a[:, None] * weight, torch.zeros_like(weight), weight, tau_used)
+
+
 @torch.no_grad()
 def guard_degenerate_rewards(rewards: Tensor, lengths: Tensor, group_ids: Tensor,
                              min_length: int = 8, penalty: float = 1.0,
@@ -224,7 +349,8 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                    stop_token_ids: tuple[int, ...] | None = None,
                    structural_token_ids: tuple[int, ...] | None = None,
                    policy_temperature: float = 1.0,
-                   fixed_weight_mask: Tensor | None = None) -> Credit:
+                   fixed_weight_mask: Tensor | None = None,
+                   contraction: str = "dot") -> Credit:
     """Exact full-vocabulary d_t with token/vocabulary blocking.
 
     old_logits [B,T,V] comes from the rollout policy at fixed hard prefixes.
@@ -233,8 +359,13 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
     Temporary vocabulary tensors are at most token_chunk_size*vocab_chunk_size.
     The caller supplies the complete logits and an unsharded embedding weight.
     Sampling temperature is applied after each block's float32 conversion.
+    ``norm_product`` replaces <g,k> by ||g||_2 ||k||_2, with
+    g = p*(W*f - E_p[W*f])/sigma and k = one_hot(sampled)-p.
+    It changes only the scalar signal; signed advantage and allocation stay fixed.
     """
     mask = _mask(response_mask)
+    if contraction not in ("dot", "norm_product"):
+        raise ValueError("Unknown credit contraction")
     if old_logits.ndim != 3 or old_logits.shape[:2] != mask.shape:
         raise ValueError("old_logits must have shape [B, T, V]")
     if token_ids.shape != mask.shape or token_ids.dtype != torch.long:
@@ -284,7 +415,22 @@ def compute_credit(old_logits: Tensor, token_ids: Tensor, input_grads: Tensor,
                 p2v += (p.square() * v).sum(-1)
             pa = (old_logits[r, t, a].float() / policy_temperature - log_z).exp()
             va = (f * rm_weight[a].float()).sum(-1)
-            direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
+            if contraction == "dot":
+                direction[r, t] = (pa * (va - mu) - p2v + mu * p2) / reward_scale[r]
+            else:
+                # Accumulate centered squares directly; subtracting raw moments
+                # loses precision for concentrated policies or near-constant v.
+                g2, k2 = torch.zeros_like(mu), torch.zeros_like(mu)
+                for lo in range(0, V, vocab_chunk_size):
+                    z = old_logits[r, t, lo:lo + vocab_chunk_size].float() / policy_temperature
+                    p = (z - log_z[:, None]).exp()
+                    v = f @ rm_weight[lo:lo + vocab_chunk_size].float().T
+                    g2 += (p * (v - mu[:, None])).square().sum(-1)
+                    k = -p
+                    inside = (a >= lo) & (a < lo + p.shape[-1])
+                    k[inside, a[inside] - lo] += 1
+                    k2 += k.square().sum(-1)
+                direction[r, t] = g2.sqrt() * k2.sqrt() / reward_scale[r]
     return allocate(direction, advantage, mask, tau, credit_lambda=credit_lambda,
                     token_ids=token_ids, freeze_stop_tokens=freeze_stop_tokens,
                     freeze_structural=freeze_structural,

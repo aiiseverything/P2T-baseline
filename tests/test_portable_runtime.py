@@ -118,7 +118,8 @@ def test_server_main_forwards_allocation_to_actual_llm_constructor(monkeypatch, 
     fake_lora.LoRARequest = object
     fake_transformers = ModuleType("transformers")
     fake_transformers.AutoTokenizer = SimpleNamespace(
-        from_pretrained=lambda *a, **kw: SimpleNamespace(eos_token_id=0))
+        from_pretrained=lambda *a, **kw: SimpleNamespace(eos_token_id=0, eos_token='<eos>',
+            pad_token=None, pad_token_id=None, get_vocab=lambda: {'<eos>': 0}))
     fake_transformers.AutoConfig = SimpleNamespace(
         from_pretrained=lambda *a, **kw: SimpleNamespace(vocab_size=12))
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)

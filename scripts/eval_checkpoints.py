@@ -35,10 +35,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
-from scripts.eval_artifacts import (atomic_text, fingerprint, file_hash, cache_matches,
+from scripts.eval_artifacts import (atomic_text, digest, fingerprint, file_hash, cache_matches,
                                     commit_cache, runtime_versions,
                                     validate_adapter_base, validate_outputs)
 from scripts.eval_policy import resolve_shared_policy, policy_engine_kwargs
+from vpo_rm.token_policy import (configure_model_padding, get_stop_token_ids,
+                                 load_actor_tokenizer, resolve_actor_tokenizer_source,
+                                 tokenize_rendered_prompts)
 
 
 def load_validation_prompts(dataset_path: str, num_prompts: int) -> list[str]:
@@ -120,20 +123,25 @@ def generate_all(runs, rendered, temps, args):
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
     from vpo_rm.integration import checked_sampling_params, vllm_support_kwargs
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
+    tokenizer_source = resolve_actor_tokenizer_source(
+        args.model, tokenizer_name=getattr(args, 'tokenizer', ''))
+    tokenizer = load_actor_tokenizer(args.model, tokenizer_name=tokenizer_source)
+    token_prompts = tokenize_rendered_prompts(tokenizer, rendered)
+    llm = LLM(model=args.model, tokenizer=tokenizer_source,
+              dtype="bfloat16", trust_remote_code=True, generation_config="vllm",
               enable_lora=True, max_lora_rank=64, max_loras=1,
               max_model_len=4096, max_num_seqs=args.max_num_seqs,
               gpu_memory_utilization=0.45, tensor_parallel_size=1, seed=args.seed,
               **policy_engine_kwargs(head))
-    from transformers import AutoConfig, AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    from transformers import AutoConfig
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     support_kwargs = vllm_support_kwargs(tokenizer, vocab_size)
     params = {t: checked_sampling_params(SamplingParams, temperature=validate_temperature(t),
                                 top_p=1.0 if t == 0 else _top_p(),
                                 top_k=-1, n=1,
                                 max_tokens=args.max_tokens, seed=args.seed,
-                                min_tokens=getattr(args, 'min_tokens', 0), stop_token_ids=_stop_ids(args.model),
+                                min_tokens=getattr(args, 'min_tokens', 0),
+                                stop_token_ids=list(get_stop_token_ids(tokenizer)),
                                 **support_kwargs,
                                 presence_penalty=_presence_penalty())
               for t in temps}
@@ -147,8 +155,11 @@ def generate_all(runs, rendered, temps, args):
                     LoRARequest(f"{label}-step-{step}", adapter_id, str(adapter)))
             for t in temps:
                 t0 = time.monotonic()
-                outs = llm.generate(rendered, params[t], lora_request=lora)
+                outs = llm.generate(token_prompts, params[t], lora_request=lora)
                 validate_outputs(outs, len(rendered), 1)
+                if any(getattr(output, 'prompt_token_ids', None) != prompt['prompt_token_ids']
+                       for output, prompt in zip(outs, token_prompts)):
+                    raise ValueError('vLLM prompt token IDs differ from the rendered chat protocol')
                 toks = [list(o.token_ids) if hasattr(o, "token_ids")
                         else list(o.outputs[0].token_ids) for o in outs]
                 generations[(label, step, t)] = toks
@@ -182,9 +193,8 @@ def score_all(generations, prompts, temps, args):
         print(f'RM loading on {device}: free={free / 2**30:.1f} GiB '
               f'total={total / 2**30:.1f} GiB', flush=True)
     rtok = AutoTokenizer.from_pretrained(args.rm, padding_side="right", trust_remote_code=True)
-    atok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    if rtok.pad_token_id is None:
-        rtok.pad_token = rtok.eos_token
+    atok = load_actor_tokenizer(args.model, tokenizer_name=getattr(args, 'tokenizer', ''))
+    configure_model_padding(rtok, fallback_token=getattr(rtok, 'pad_token', None))
     rm_base = AutoModelForSequenceClassification.from_pretrained(
         args.rm, torch_dtype=torch.bfloat16, trust_remote_code=True).to(device).eval()
     backbone = getattr(rm_base, "base_model", None) or getattr(rm_base, "model", None)
@@ -239,6 +249,8 @@ def main():
     p.add_argument("--run", action="append", required=True, metavar="LABEL=PATH",
                    help='Training run, direct adapter directory, or LABEL=none for Base')
     p.add_argument("--model", default="models/Qwen3-14B-Base")
+    p.add_argument('--tokenizer', default='',
+                   help='Actor tokenizer artifacts; defaults to --model')
     p.add_argument("--rm", default="models/Skywork-Reward-V2-Qwen3-8B")
     p.add_argument("--dataset-path",
                    default="datasets/ultrafeedback_binarized/data/train_prefs-00000-of-00001.parquet")
@@ -273,13 +285,16 @@ def main():
         runs.append((label, Path(path)))
 
     from vpo_rm.trainer import VPOTrainer
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoConfig
     from vpo_rm.integration import sampling_summary, vllm_support_kwargs
-    atok = AutoTokenizer.from_pretrained(args.model, padding_side="left", trust_remote_code=True)
+    args.tokenizer = str(Path(resolve_actor_tokenizer_source(
+        args.model, tokenizer_name=args.tokenizer)).resolve())
+    atok = load_actor_tokenizer(args.model, tokenizer_name=args.tokenizer)
     actor_vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     support_summary = sampling_summary(vllm_support_kwargs(atok, actor_vocab_size))
     prompts = load_validation_prompts(args.dataset_path, args.num_prompts)
     rendered = [VPOTrainer._render_chat_prompt(atok, p) for p in prompts]
+    prompt_token_ids = [row['prompt_token_ids'] for row in tokenize_rendered_prompts(atok, rendered)]
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
@@ -291,6 +306,9 @@ def main():
     head, policies = resolve_shared_policy([adapter for _, _, adapter in checkpoints], args.policy_head_dtype)
     config = {'args': vars(args), 'top_p': _top_p(), 'presence_penalty': _presence_penalty(),
               'model': fingerprint(args.model, full_weights=False),
+              'tokenizer': {'source': args.tokenizer,
+                            'fingerprint': fingerprint(args.tokenizer, full_weights=False)},
+              'prompt_token_ids_sha256': digest(prompt_token_ids),
               'rm': fingerprint(args.rm, full_weights=False), 'dataset': fingerprint(args.dataset_path),
               'adapters': {f'{label}/{step}': None if str(adapter) == 'none' else fingerprint(adapter)
                            for label, step, adapter in checkpoints},

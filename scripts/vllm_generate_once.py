@@ -12,11 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from vpo_rm.integration import (vllm_sampling_kwargs, generation_payload,
                                 checked_sampling_params, sampling_summary)
+from vpo_rm.token_policy import (load_actor_tokenizer, resolve_actor_tokenizer_source,
+                                 tokenize_rendered_prompts)
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
+    p.add_argument("--tokenizer", default="", help="Actor tokenizer; defaults to saved adapter tokenizer, then base")
     p.add_argument("--adapter", required=True)
     p.add_argument("--prompts", required=True, help="JSON list of rendered prompts")
     p.add_argument("--output", required=True, help="JSON output path")
@@ -31,17 +34,18 @@ def main() -> None:
 
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoConfig
 
     prompts = json.loads(Path(args.prompts).read_text())
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer_source = resolve_actor_tokenizer_source(args.model, args.adapter, args.tokenizer)
+    tokenizer = load_actor_tokenizer(args.model, args.adapter, args.tokenizer)
+    prompts = tokenize_rendered_prompts(tokenizer, prompts)
     vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     sampling = vllm_sampling_kwargs(tokenizer, vocab_size, {
         "max_tokens": args.max_tokens, "min_tokens": args.min_tokens,
         "temperature": args.temperature, "group_size": args.group_size,
         "probe": args.probe, "presence_penalty": float(os.environ.get("PRESENCE_PENALTY", "0"))})
-    llm = LLM(model=args.model, dtype="bfloat16", trust_remote_code=True,
+    llm = LLM(model=args.model, tokenizer=tokenizer_source, dtype="bfloat16", trust_remote_code=True,
               enable_lora=True, max_lora_rank=64, max_loras=1,
               seed=args.seed, generation_config="vllm",
               max_model_len=4096, max_num_seqs=args.max_num_seqs,

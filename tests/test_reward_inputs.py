@@ -97,7 +97,8 @@ def test_trainer_scores_full_chat_and_only_maps_unchanged_gradients(tokenizers):
     torch.manual_seed(31)
     model = LastTokenReward(Backbone(), nn.Linear(2, 1, bias=False))
     t = object.__new__(VPOTrainer)
-    t.cfg = types.SimpleNamespace(method='vpo_rm', microbatch_responses=1)
+    t.cfg = types.SimpleNamespace(method='vpo_rm', microbatch_responses=1,
+                                 max_prompt_tokens=2048, max_response_tokens=2048)
     t.actor_tokenizer, t.reward_tokenizer, t.reward = actor, rm_tok, model
     t.reward_device = torch.device('cpu')
     ids = actor.encode('Hello', add_special_tokens=False)+[198,198]+actor.encode('World',add_special_tokens=False)+[151643]

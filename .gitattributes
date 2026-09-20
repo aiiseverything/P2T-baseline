@@ -1,0 +1,4 @@
+# Preserve the exact bytes used by the published data and source hash manifests.
+*.csv -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+paper_figures/** -text -whitespace
+runs/** -text -whitespace

@@ -1,0 +1,20 @@
+{
+  "cases": 4,
+  "tokens": 76,
+  "source_sha256": "all match",
+  "renderer_sha256": "matches",
+  "embedded_truetype_fonts": 7,
+  "type3_fonts": 0,
+  "pdf_image_objects": "one: colorbar gradient; token highlights and text are vector",
+  "png_size": [
+    2591,
+    1839
+  ],
+  "figure_inches": [
+    7.199999999999999,
+    5.111111111111111
+  ],
+  "darkest_fill_text_contrast": 4.751527093627492,
+  "reference": "verified by character deduplication",
+  "svg_xml": "valid"
+}

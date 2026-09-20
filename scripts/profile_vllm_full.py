@@ -32,6 +32,7 @@ import torch
 from vpo_rm.trainer import TrainerConfig, VPOTrainer, load_prompt_dataset
 from vpo_rm.length_reward_cli import add_length_reward_args, length_reward_config_kwargs
 from vpo_rm.reward_inputs import REWARD_INPUT_PROTOCOL
+from vpo_rm.token_policy import resolve_actor_tokenizer_source
 
 
 def profile_source_manifest():
@@ -43,7 +44,8 @@ def profile_source_manifest():
                "scripts/vllm_generate_server.py", "scripts/corrected_rl_launcher.py",
                "scripts/eval_artifacts.py", "scripts/preflight_training.py",
                "scripts/preflight_quality.py", "scripts/check_ssh_capacity.py",
-               "vpo_rm/policy_precision.py"]
+               "vpo_rm/policy_precision.py", "scripts/llama_rl_launcher.py",
+               "scripts/check_llama_protocol.py"]
     return {"reward_input_protocol": REWARD_INPUT_PROTOCOL,
             "source_sha256": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                               for name in sources}}
@@ -66,9 +68,13 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/Qwen3-14B")
     p.add_argument("--rm", default="models/Skywork-Reward-V2-Qwen3-8B")
+    p.add_argument("--tokenizer", default="", help="Actor tokenizer; defaults to saved SFT tokenizer, then base")
     p.add_argument("--dataset-path", default="datasets/ultrafeedback_binarized/data/train_prefs-00000-of-00001.parquet")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--method", choices=["grpo", "vpo_rm"], default="vpo_rm")
+    p.add_argument("--credit-source", choices=["rm_gradient", "random_direction", "random_band", "shuffle", "norm_product"],
+                   default="rm_gradient",
+                   help="VPO credit: RM dot product, random, post-allocation shuffle, or gradient norm product")
     p.add_argument("--max-rollouts", type=int, default=3)
     p.add_argument("--max-response-tokens", type=int, default=2048)
     p.add_argument("--generation-microbatch", type=int, default=32)
@@ -123,10 +129,19 @@ def parse_args(argv=None):
     return args
 
 
+def require_physical_reward_microbatch(config):
+    # RM batching changes BF16 arithmetic even for native HF scoring. The
+    # calibration, preflight and formal profile all use the same single-row path.
+    if type(config.microbatch_responses) is not int or config.microbatch_responses != 1:
+        raise ValueError("Validated profile requires physical RM microbatch_responses=1")
+    return config
+
+
 def build_trainer_config(args, output_dir):
-    return TrainerConfig(
+    config = TrainerConfig(
         model_name=args.model, reward_model_name=args.rm, output_dir=str(output_dir),
-        method=args.method, rollout_iterations=args.max_rollouts,
+        tokenizer_name=args.tokenizer,
+        method=args.method, credit_source=args.credit_source, rollout_iterations=args.max_rollouts,
         prompts_per_rollout=8, group_size=8,
         max_response_tokens=args.max_response_tokens,
         generation_microbatch_responses=args.generation_microbatch,
@@ -146,6 +161,13 @@ def build_trainer_config(args, output_dir):
         allocated_gpu_count=2 + args.vllm_tensor_parallel_size,
         **length_reward_config_kwargs(args),
     ).resolved()
+    return require_physical_reward_microbatch(config)
+
+
+def unpadded_prompt_token_ids(batch):
+    """Serialize exactly the attended HF prompt IDs for generation RPCs."""
+    return [ids[mask.bool()].tolist()
+            for ids, mask in zip(batch["input_ids"], batch["attention_mask"])]
 
 
 def pack_vllm_rollout(result, batch, rendered, *, group_size, max_response_tokens,
@@ -155,8 +177,7 @@ def pack_vllm_rollout(result, batch, rendered, *, group_size, max_response_token
         raise RuntimeError("vLLM rollout requires processed logprobs")
     if type(result.get("adapter_id")) is not int or result["adapter_id"] != adapter_id:
         raise RuntimeError("vLLM rollout adapter identity differs from the request")
-    expected_prompts = [ids[mask.bool()].tolist()
-                        for ids, mask in zip(batch["input_ids"], batch["attention_mask"])]
+    expected_prompts = unpadded_prompt_token_ids(batch)
     if len(rendered) != len(expected_prompts) or result.get("prompt_token_ids") != expected_prompts:
         raise RuntimeError("vLLM prompt token IDs differ from unpadded HF prompts")
     rows, finish_reasons = result.get("rows", []), result.get("finish_reasons", [])
@@ -228,6 +249,7 @@ def vllm_subprocess_environment(tensor_parallel_size, device_count, environ=None
 def vllm_server_command(args, socket_path):
     return [sys.executable, str(ROOT / "scripts/vllm_generate_server.py"),
             "--model", args.model, "--socket", str(socket_path),
+            "--tokenizer", resolve_actor_tokenizer_source(args.model, args.init_adapter, args.tokenizer),
             "--max-num-seqs", str(args.generation_microbatch),
             "--seed", str(args.generation_seed),
             "--gpu-memory-utilization", str(args.vllm_gpu_memory_utilization),
@@ -289,6 +311,7 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     trainer = VPOTrainer.from_pretrained(cfg)
+    require_physical_reward_microbatch(trainer.cfg)
     prompts = trainer.filter_prompts(prompts)
     if len(prompts) < cfg.prompts_per_rollout * args.max_rollouts:
         raise RuntimeError("not enough prompts after filtering")
@@ -356,7 +379,8 @@ def main():
         nonlocal generation_stats
         trainer.actor.eval()
         batch, rendered = trainer._encode_prompts(batch_prompts)
-        result = request({"prompts": rendered, "adapter": str(adapter_path),
+        result = request({"prompts": rendered, "prompt_token_ids": unpadded_prompt_token_ids(batch),
+                          "adapter": str(adapter_path),
                           "adapter_id": adapter_id, "max_tokens": cfg.max_response_tokens,
                           "group_size": cfg.group_size, "temperature": cfg.temperature,
                           "min_tokens": cfg.min_response_tokens, "top_p": cfg.top_p,
@@ -423,7 +447,9 @@ def main():
                         shutil.rmtree(old, ignore_errors=True)
         # Keep the Actor on its GPU; this also checks independent GPU residency.
         tp = time.monotonic()
-        probe = request({"prompts": [trainer._render_chat_prompt(trainer.actor_tokenizer, prompts[0])],
+        probe_batch, probe_rendered = trainer._encode_prompts(prompts[:1])
+        probe = request({"prompts": probe_rendered,
+                         "prompt_token_ids": unpadded_prompt_token_ids(probe_batch),
                          "adapter": str(adapter_path), "adapter_id": adapter_id,
                          "probe": True, "max_tokens": 8})
         probe_sec = time.monotonic() - tp

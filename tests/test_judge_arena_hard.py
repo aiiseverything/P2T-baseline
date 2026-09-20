@@ -50,6 +50,77 @@ def make_run(tmp_path, inputs, protocol):
 CUSTOM_BASELINE = "gpt-4o-mini-2024-07-18"
 
 
+@pytest.mark.parametrize("baseline_model", [judge.BASELINE_MODEL, CUSTOM_BASELINE])
+def test_custom_judge_dispatch_export_and_resume_bind_actual_model(tmp_path, inputs, protocol, baseline_model):
+    selected = judge.load_protocol(judge.ROOT / "third_party/arena_hard",
+                                   baseline_model=baseline_model, judge_model="gpt-4o")
+    assert selected["judge"] == "gpt-4o"
+    assert selected["official_judge_model"] == "gpt-4.1"
+    assert selected["uses_official_judge"] is False
+    assert selected["protocol"] == ("arena_hard_v2_custom_judge_two_order_v1"
+        if baseline_model == judge.BASELINE_MODEL
+        else "arena_hard_v2_custom_judge_two_order_custom_baseline_v1")
+    for key in ("system_prompt", "prompt_template", "regex_patterns", "temperature", "max_tokens", "source_sha256"):
+        assert selected[key] == protocol[key]
+    altered = copy.deepcopy(inputs)
+    for row in altered[1]:
+        row["model"] = baseline_model
+    relay = FakeRelay()
+    run = make_run(tmp_path, altered, selected)
+    run.run(lambda: relay, ["u0"], workers=2, budget_cny=5)
+    assert len(relay.calls) == 2
+    assert all(request["model"] == "gpt-4o" for request in relay.calls)
+    row = judge.load_jsonl(tmp_path / "candidate.jsonl")[0]
+    assert row["judge"] == "gpt-4o" and row["baseline"] == baseline_model
+    record_path = run.game_path("candidate", "u0", 0)
+    record = json.loads(record_path.read_text())
+    assert record["judge_model"] == "gpt-4o"
+    assert record["protocol_sha256"] == judge.digest(selected)
+    make_run(tmp_path, altered, selected).run(lambda: pytest.fail("no duplicate calls"), ["u0"], budget_cny=5)
+    original_judge = judge.load_protocol(judge.ROOT / "third_party/arena_hard", baseline_model=baseline_model)
+    with pytest.raises(ValueError, match="identity"):
+        make_run(tmp_path, altered, original_judge).run(lambda: pytest.fail("no mixed judges"), ["u0"], budget_cny=5)
+    record["judge_model"] = "gpt-4.1"
+    record_path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="game identity"):
+        make_run(tmp_path, altered, selected).load_record("candidate", "u0", 0)
+
+
+def test_explicit_original_judge_keeps_default_protocol(protocol):
+    assert judge.load_protocol(judge.ROOT / "third_party/arena_hard", judge_model="gpt-4.1") == protocol
+    assert "official_judge_model" not in protocol and "uses_official_judge" not in protocol
+
+
+@pytest.mark.parametrize("judge_model", ["gpt-4o-mini", "unknown", "", None])
+def test_unsupported_judge_rejected_before_dispatch(judge_model):
+    with pytest.raises(ValueError, match="judge"):
+        judge.load_protocol(judge.ROOT / "third_party/arena_hard", judge_model=judge_model)
+
+
+@pytest.mark.parametrize("damage", ["protocol", "official_judge_model", "uses_official_judge"])
+def test_custom_judge_cannot_claim_official_protocol(tmp_path, inputs, damage):
+    selected = judge.load_protocol(judge.ROOT / "third_party/arena_hard", judge_model="gpt-4o")
+    selected.pop(damage)
+    with pytest.raises(ValueError, match="custom judge"):
+        make_run(tmp_path, inputs, selected)
+
+
+def test_custom_judge_cli_dry_run_selects_explicit_model(tmp_path, inputs, monkeypatch, capsys):
+    questions, baseline, answers = inputs
+    for filename, rows in [("questions.jsonl", questions), ("reference.jsonl", baseline),
+                           ("candidate.jsonl", answers["candidate"])]:
+        (tmp_path / filename).write_text("".join(json.dumps(row) + "\n" for row in rows))
+    output = tmp_path / "untouched"
+    monkeypatch.setattr(sys, "argv", ["judge_arena_hard.py", "--questions", str(tmp_path / "questions.jsonl"),
+        "--baseline", str(tmp_path / "reference.jsonl"), "--answers-dir", str(tmp_path),
+        "--output-dir", str(output), "--tags", "candidate", "--budget-cny", "5", "--dry-run", "--judge-model", "gpt-4o"])
+    judge.main()
+    result = json.loads(capsys.readouterr().out)
+    selected = judge.load_protocol(judge.ROOT / "third_party/arena_hard", judge_model="gpt-4o")
+    assert result["protocol_sha256"] == judge.digest(selected)
+    assert not output.exists()
+
+
 def test_custom_baseline_protocol_keeps_official_source_and_default_unchanged(protocol):
     custom = judge.load_protocol(judge.ROOT / "third_party/arena_hard", baseline_model=CUSTOM_BASELINE)
     assert custom["baseline"] == CUSTOM_BASELINE

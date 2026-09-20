@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import math
@@ -26,6 +27,19 @@ from scripts import profile_vllm_full as profile
 
 ARMS = ('grpo', 'lam2', 'lam4', 'lam8')
 LOGPROB_LIMITS = {'mean_abs_error': .02, 'p99_abs_error': .10, 'max_abs_error': .30}
+
+
+def experiment_launcher(family, profile=None):
+    """Select the experiment's immutable config/identity; Llama profiles are explicit."""
+    modules = {'qwen': 'scripts.corrected_rl_launcher', 'llama': 'scripts.llama_rl_launcher'}
+    if family not in modules:
+        raise ValueError(f'Unknown experiment family: {family}')
+    launcher = importlib.import_module(modules[family])
+    if profile is not None:
+        if not hasattr(launcher, 'set_profile'):
+            raise ValueError(f'Experiment family {family} has no actor profiles')
+        launcher.set_profile(profile)
+    return launcher
 
 
 def write_json(path, value):
@@ -151,9 +165,10 @@ class WorkerChecks:
     def quality(self, connection, request, stage):
         from scripts.preflight_quality import CONTROLS, evaluate_quality
         tokenizer = self.trainer.actor_tokenizer
+        batch, rendered = self.trainer._encode_prompts([item['prompt'] for item in CONTROLS])
         payload = {'adapter': request['adapter'], 'adapter_id': request['adapter_id'],
-                   'prompts': [self.trainer._render_chat_prompt(tokenizer, item['prompt'])
-                               for item in CONTROLS], 'probe': True, 'max_tokens': 128}
+                   'prompts': rendered, 'prompt_token_ids': profile.unpadded_prompt_token_ids(batch),
+                   'probe': True, 'max_tokens': 128}
         connection.sendall((json.dumps(payload) + '\n').encode())
         with connection.makefile('r') as reader:
             result = json.loads(reader.readline())
@@ -162,7 +177,8 @@ class WorkerChecks:
         texts = [tokenizer.decode(row, skip_special_tokens=True,
                  clean_up_tokenization_spaces=False) for row in result['rows']]
         baseline = self.report['quality'].get('before', {}).get('score')
-        checked = evaluate_quality(texts, baseline_score=baseline if stage == 'after' else None)
+        checked = evaluate_quality(texts, baseline_score=baseline if stage == 'after' else None,
+                                   rule=getattr(self.args, 'quality_rule', 'strict'))
         self.report['quality'][stage] = checked
         self.save()
         if not checked['passed']:
@@ -171,22 +187,25 @@ class WorkerChecks:
     def check_probabilities(self, request, result):
         import torch
         from vpo_rm.integration import actor_response_logits, sampling_logits, selected_logp_from_logits
+        from vpo_rm.token_policy import tokenize_rendered_prompts
         adapter_id = request['adapter_id']
         if adapter_id in self.checked_adapter_ids:
             return
         if result.get('logprobs_mode') != 'processed_logprobs':
             raise ValueError('Preflight needs vLLM processed logprobs')
         trainer, rows = self.trainer, result['rows']
+        prompts = tokenize_rendered_prompts(trainer.actor_tokenizer, request['prompts'],
+                                            request.get('prompt_token_ids'))
+        expected_prefixes = [prompt['prompt_token_ids'] for prompt in prompts]
+        if expected_prefixes != result.get('prompt_token_ids'):
+            raise ValueError('HF and vLLM prompt tokenization differs')
         n = int(request.get('group_size', 8))
         indices = sorted({0, len(rows) // 2})
         pairs, left, right = [], [], []
         with torch.no_grad():
             for index in indices:
                 prompt_index = index // n
-                prefix = trainer.actor_tokenizer(request['prompts'][prompt_index],
-                                                 add_special_tokens=True)['input_ids']
-                if prefix != result['prompt_token_ids'][prompt_index]:
-                    raise ValueError('HF and vLLM prompt tokenization differs')
+                prefix = expected_prefixes[prompt_index]
                 response = rows[index][:128]
                 tokens = torch.tensor([response], device=trainer.actor_device)
                 ids = torch.tensor([prefix + response], device=trainer.actor_device)
@@ -288,7 +307,9 @@ def run_capacity(checks):
 
 def run_worker(args):
     import torch
-    from scripts.corrected_rl_launcher import RUNTIME, common_config, validation_identity
+    launcher = experiment_launcher(args.experiment_family, getattr(args, 'experiment_profile', None))
+    RUNTIME, common_config, validation_identity = (launcher.RUNTIME, launcher.common_config,
+                                                  launcher.validation_identity)
     if torch.cuda.device_count() != 3:
         raise RuntimeError('Expose exactly three GPUs for Actor, RM and vLLM')
     runtime = runtime_report(args.runtime_image)
@@ -302,7 +323,8 @@ def run_worker(args):
         raise FileExistsError(f'Use a fresh preflight arm output: {output}')
     identity = validation_identity(args.project_root)
     checks = WorkerChecks(args)
-    checks.report.update(identity, runtime=runtime, source_root=str(ROOT))
+    checks.report.update(identity, runtime=runtime, source_root=str(ROOT),
+                         experiment_family=args.experiment_family)
     original_trainer = profile.VPOTrainer
 
     class CheckedTrainer(original_trainer):
@@ -354,12 +376,11 @@ def run_worker(args):
         profile.main()
         if checks.report['rollouts'] != 2 or checks.checked_adapter_ids != {1, 2, 3}:
             raise ValueError('Preflight did not verify two updates and all three adapter versions')
-        from scripts.corrected_rl_launcher import check_initial_rollouts
-        checks.report['startup_validation'] = check_initial_rollouts(
+        checks.report['startup_validation'] = launcher.check_initial_rollouts(
             output, {'common_config': common_config(args.project_root)})
         if checks.report['startup_validation'] is None:
             raise ValueError('Preflight lacks the formal first-two-rollout validation')
-        if args.worker_arm == 'lam8':
+        if args.worker_arm == getattr(args, 'capacity_arm', 'lam8'):
             checks.report['capacity'] = run_capacity(checks)
         if validation_identity(args.project_root) != identity:
             raise ValueError('Source or input identity changed during preflight')
@@ -378,6 +399,15 @@ def main(argv=None):
     parser.add_argument('--project-root', type=Path, default=ROOT,
                         help='Read-only original model/dataset root; code always loads from this script snapshot')
     parser.add_argument('--runtime-image', required=True, help='Actual container image supplied by the job launcher')
+    parser.add_argument('--experiment-family', choices=('qwen', 'llama'), default='qwen')
+    parser.add_argument('--experiment-profile', default=None,
+                        help='Llama actor profile recorded in the suite manifest (instruct or base)')
+    parser.add_argument('--arms', nargs='+', choices=ARMS, default=list(ARMS),
+                        help='Gate arms in order; grpo must come first because it measures sigma0')
+    parser.add_argument('--capacity-arm', choices=ARMS, default='lam8',
+                        help='VPO arm that runs the long-sequence capacity check after its rollouts')
+    parser.add_argument('--quality-rule', choices=('strict', 'final_word'), default='strict',
+                        help='Canary acceptance rule frozen by the experiment profile before GPU execution')
     parser.add_argument('--worker-arm', choices=ARMS, help=argparse.SUPPRESS)
     parser.add_argument('--sigma0', type=float, help=argparse.SUPPRESS)
     parser.add_argument('--dry-run', action='store_true')
@@ -386,27 +416,39 @@ def main(argv=None):
     args.project_root = args.project_root.resolve()
     if args.worker_arm:
         return run_worker(args)
-    from scripts.corrected_rl_launcher import common_config, validation_identity
+    if len(set(args.arms)) != len(args.arms) or args.arms[0] != 'grpo':
+        raise ValueError('Gate arms must be distinct and start with grpo, which measures sigma0')
+    if args.capacity_arm not in args.arms or args.capacity_arm == 'grpo':
+        raise ValueError('The capacity arm must be one of the gated VPO arms')
+    launcher = experiment_launcher(args.experiment_family, args.experiment_profile)
+    common_config, validation_identity = launcher.common_config, launcher.validation_identity
     if args.dry_run:
-        print(json.dumps({'source_root': str(ROOT), 'arms': {arm: profile_arguments(
-            common_config(args.project_root), arm, args.output_dir / arm) for arm in ARMS},
+        print(json.dumps({'source_root': str(ROOT), 'experiment_profile': args.experiment_profile,
+            'arms': {arm: profile_arguments(
+            common_config(args.project_root), arm, args.output_dir / arm) for arm in args.arms},
             'calibration': 'GRPO canonical initial policy, 128 prompts; share measured sigma0',
-            'capacity': 'lam8 after real updates: two 64x2048 steps with formal credit microbatch; synthetic sampling correction explicitly disabled'}, indent=2))
+            'capacity': f'{args.capacity_arm} after real updates: two 64x2048 steps with formal credit microbatch; synthetic sampling correction explicitly disabled'}, indent=2))
         return
     args.output_dir.mkdir(parents=True, exist_ok=False)
     identity = validation_identity(args.project_root)
     result = {**identity, 'status': 'started', 'source_root': str(ROOT), 'arms': {},
-              'runtime_image': args.runtime_image,
+              'runtime_image': args.runtime_image, 'experiment_family': args.experiment_family,
+              'gate_arms': list(args.arms), 'capacity_arm': args.capacity_arm,
+              'quality_rule': args.quality_rule,
               'preflight_source_sha256': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                  for name in ('scripts/preflight_training.py', 'scripts/preflight_quality.py',
                               'scripts/check_ssh_capacity.py', 'scripts/corrected_rl_launcher.py')}}
     destination = args.output_dir / 'gpu-validation.json'
     sigma0 = None
     try:
-        for arm in ARMS:
+        for arm in args.arms:
             command = [sys.executable, str(Path(__file__).resolve()), '--output-dir',
                        str(args.output_dir / arm), '--project-root', str(args.project_root),
-                       '--runtime-image', args.runtime_image, '--worker-arm', arm]
+                       '--runtime-image', args.runtime_image, '--worker-arm', arm,
+                       '--experiment-family', args.experiment_family,
+                       '--capacity-arm', args.capacity_arm, '--quality-rule', args.quality_rule]
+            if args.experiment_profile is not None:
+                command += ['--experiment-profile', args.experiment_profile]
             if sigma0 is not None:
                 command += ['--sigma0', str(sigma0)]
             with (args.output_dir / f'{arm}.log').open('w') as log:
@@ -429,7 +471,7 @@ def main(argv=None):
                 result['calibration'] = {'path': str(calibration_path),
                     'sha256': hashlib.sha256(calibration_path.read_bytes()).hexdigest(), 'sigma0': sigma0}
             elif report['prompt_sha256'] != result['arms']['grpo']['prompt_sha256']:
-                raise ValueError('The four arms did not use identical training prompts')
+                raise ValueError('The gated arms did not use identical training prompts')
             write_json(destination, result)
         if validation_identity(args.project_root) != identity:
             raise ValueError('Source or input identity changed during preflight')

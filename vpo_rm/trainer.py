@@ -20,21 +20,23 @@ import math
 import os
 import random
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import torch
 
 from .alignment import check_response_tokens, check_tokenizers, shared_output_mask
-from .core import Credit, grpo_policy_loss, rollout_importance_weights
+from .core import (Credit, GRADIENT_CREDIT_SOURCES, RANDOM_CREDIT_SOURCES,
+                   grpo_policy_loss, rollout_importance_weights, shuffle_credit)
 from .integration import (RolloutCache, actor_response_logits, build_credit_cache,
                           response_reward_gradients, selected_logp_from_logits,
                           sampling_logits, validate_response_termination)
 from .reward import LastTokenReward
 from .model_identity import validate_adapter_base
 from .reward_inputs import build_reward_input, canonical_reward_input, REWARD_INPUT_PROTOCOL
-from .token_policy import get_stop_token_ids, get_structural_token_ids
+from .token_policy import (get_stop_token_ids, get_structural_token_ids,
+                           configure_model_padding, load_actor_tokenizer, get_special_token_ids)
 
 
 def normalize_prompt(text: str) -> str:
@@ -80,6 +82,7 @@ def check_fresh_output(output_dir):
 class TrainerConfig:
     model_name: str = "Qwen/Qwen3-14B"
     reward_model_name: str = "Skywork/Skywork-Reward-V2-Qwen3-8B"
+    tokenizer_name: str = ""  # Empty selects saved initialization tokenizer, then base.
     output_dir: str = "runs/skywork"
     actor_device: str = "cuda:0"
     reward_device: str = "cuda:1"
@@ -125,6 +128,7 @@ class TrainerConfig:
     length_calibration_prompts: int = 128
     degenerate_newline_run: int = 32
     method: str = "vpo_rm"
+    credit_source: str = "rm_gradient"  # Ablation: random_direction / random_band replace RM gradients.
     checkpoint_interval: int = 100
     token_chunk_size: int = 128
     vocab_chunk_size: int = 8192
@@ -173,6 +177,11 @@ class TrainerConfig:
             c.min_response_tokens = 0 if c.length_reward_mode == "soft" else 8
         if c.method not in {"grpo", "vpo_rm"}:
             raise ValueError("method must be grpo or vpo_rm")
+        from .core import CREDIT_SOURCES
+        if c.credit_source not in CREDIT_SOURCES:
+            raise ValueError(f"credit_source must be one of {CREDIT_SOURCES}")
+        if c.credit_source != "rm_gradient" and c.method != "vpo_rm":
+            raise ValueError("random credit ablations require method=vpo_rm")
         if c.kl_reference not in {"rollout", "init"}:
             raise ValueError("kl_reference must be rollout or init")
         if c.init_adapter and not c.lora:
@@ -248,6 +257,12 @@ class VPOTrainer:
         self.stop_token_ids = get_stop_token_ids(self.actor_tokenizer)
         self.structural_token_ids = (get_structural_token_ids(self.actor_tokenizer)
                                      if self.cfg.freeze_structural else ())
+        # Ablation noise is drawn from its own stream so the sampler and PEFT
+        # initialization RNG consumption stay identical to the RM-gradient run.
+        self._credit_generator = None
+        if self.cfg.credit_source in (*RANDOM_CREDIT_SOURCES, "shuffle"):
+            self._credit_generator = torch.Generator(device=self.actor_device)
+            self._credit_generator.manual_seed(self.cfg.seed * 1_000_003 + 20260919)
         if any(isinstance(m, torch.nn.Dropout) and m.p > 0 for m in self.actor.modules()):
             raise ValueError("Actor dropout must be zero to match generation and training probabilities")
         for name in ("attention_dropout", "hidden_dropout", "hidden_dropout_prob", "attention_probs_dropout_prob"):
@@ -280,11 +295,12 @@ class VPOTrainer:
             try:
                 return tokenizer.apply_chat_template(
                     messages, tokenize=tokenize, add_generation_prompt=True,
-                    enable_thinking=False)
+                    enable_thinking=False, return_dict=False)
             except (ImportError, TypeError, ValueError):
                 try:
                     return tokenizer.apply_chat_template(
-                        messages, tokenize=tokenize, add_generation_prompt=True)
+                        messages, tokenize=tokenize, add_generation_prompt=True,
+                        return_dict=False)
                 except (ImportError, TypeError, ValueError):
                     pass
         if tokenize:
@@ -304,24 +320,20 @@ class VPOTrainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(c.seed)
         dtype = torch.bfloat16 if c.actor_device.startswith("cuda") else torch.float32
-        atok = AutoTokenizer.from_pretrained(c.model_name, padding_side="left", trust_remote_code=True)
+        atok = load_actor_tokenizer(c.model_name, c.init_adapter, c.tokenizer_name)
         rtok = AutoTokenizer.from_pretrained(c.reward_model_name, padding_side="right", trust_remote_code=True)
-        # Skywork checkpoints sometimes carry 151654 as pad; experiment contract uses EOS.
-        eos = atok.eos_token_id
-        for tok in (atok, rtok):
-            if eos is not None:
-                tok.pad_token = atok.eos_token
-                tok.pad_token_id = eos
+        # Llama owns a dedicated pad independently in both tokenizers. Keep
+        # the historical actor-EOS fallback for the Qwen experiment family.
+        configure_model_padding(rtok, fallback_token=atok.pad_token)
         actor = AutoModelForCausalLM.from_pretrained(c.model_name, torch_dtype=dtype,
                                                      trust_remote_code=True)
         rm_base = AutoModelForSequenceClassification.from_pretrained(c.reward_model_name,
                                                                        torch_dtype=dtype,
                                                                        trust_remote_code=True)
-        if eos is not None:
-            actor.config.pad_token_id = eos
-            if getattr(actor, "generation_config", None) is not None:
-                actor.generation_config.pad_token_id = eos
-            rm_base.config.pad_token_id = eos
+        actor.config.pad_token_id = atok.pad_token_id
+        if getattr(actor, "generation_config", None) is not None:
+            actor.generation_config.pad_token_id = atok.pad_token_id
+        rm_base.config.pad_token_id = rtok.pad_token_id
         # Keep only the decoder backbone and scalar score head.  This also works for Qwen3.
         backbone = getattr(rm_base, "base_model", None)
         if backbone is None:
@@ -368,7 +380,9 @@ class VPOTrainer:
         texts = [self._render_chat_prompt(self.actor_tokenizer, p, tokenize=False)
                  for p in prompts]
         batch = self.actor_tokenizer(texts, return_tensors="pt", padding=True,
-                                     truncation=True, max_length=self.cfg.max_prompt_tokens)
+                                     add_special_tokens=False, truncation=False)
+        if (batch["attention_mask"].sum(-1) > self.cfg.max_prompt_tokens).any():
+            raise ValueError("Actor prompt exceeds max_prompt_tokens after chat formatting; filter prompts first")
         return {k: v.to(self.actor_device) for k, v in batch.items()}, texts
 
     def filter_prompts(self, prompts: Sequence[str]) -> list[str]:
@@ -471,16 +485,25 @@ class VPOTrainer:
         if len(prompts) != len(responses) or responses.shape != rmask.shape:
             raise ValueError("Reward prompts, responses and masks must align")
         rows = []
+        rm_budget = self.cfg.max_prompt_tokens + self.cfg.max_response_tokens
+        native_budget = getattr(self.reward_tokenizer, "model_max_length", None)
+        if isinstance(native_budget, (int, float)) and math.isfinite(native_budget) and native_budget > 0:
+            rm_budget = min(rm_budget, int(native_budget))
         mapped = torch.full_like(responses, -1, dtype=torch.long)
         for index, (prompt, response, valid) in enumerate(zip(prompts, responses, rmask)):
             answer = response[valid].detach().cpu().tolist()
             encoded = build_reward_input(self.actor_tokenizer, self.reward_tokenizer, str(prompt), answer)
+            if len(encoded.input_ids) > rm_budget:
+                raise ValueError(f"Canonical RM input has {len(encoded.input_ids)} tokens, exceeds "
+                                 f"{rm_budget} token budget; no truncation is allowed")
             rows.append(encoded.input_ids)
             mapped[index, valid] = torch.tensor(encoded.response_positions, device=mapped.device)
         self._reward_fixed_weight_mask = rmask & mapped.lt(0)
-        special_ids = torch.tensor(self.actor_tokenizer.all_special_ids, device=responses.device)
+        special_ids = torch.tensor(get_special_token_ids(self.actor_tokenizer), device=responses.device)
         content_mask = rmask & ~torch.isin(responses, special_ids)
         self._reward_alignment_stats = {
+            "rm_max_input_tokens": max(map(len, rows)),
+            "rm_input_token_budget": rm_budget,
             "rm_mapped_tokens": int((rmask & mapped.ge(0)).sum()),
             "rm_unmapped_tokens": int(self._reward_fixed_weight_mask.sum()),
             "rm_unmapped_content_tokens": int((content_mask & mapped.lt(0)).sum()),
@@ -506,9 +529,11 @@ class VPOTrainer:
                 rmask_full[j, :len(row)] = 1
             toks = responses[chunk_start:chunk_end].to(self.reward_device)
             valid = rmask[chunk_start:chunk_end].to(self.reward_device) & rpos.ge(0)
-            if self.cfg.method == "grpo":
-                # GRPO uses only sequence rewards.  Avoid constructing the input
-                # gradient graph (which is the expensive VPO-RM operation).
+            if self.cfg.method == "grpo" or getattr(self.cfg, "credit_source", "rm_gradient") in RANDOM_CREDIT_SOURCES:
+                # GRPO and the random-credit ablations use only sequence rewards.
+                # Avoid constructing the input gradient graph (the expensive
+                # VPO-RM operation); the canonical mapping above still fixes
+                # unmapped positions at unit credit for the ablation.
                 with torch.no_grad():
                     emb = self.reward.get_input_embeddings()(rid)
                     reward = self.reward(inputs_embeds=emb, attention_mask=rmask_full)
@@ -632,6 +657,7 @@ class VPOTrainer:
                 structural_token_ids=self.structural_token_ids,
                 fixed_weight_mask=fixed[sl].to(self.actor_device),
                 policy_temperature=self.cfg.temperature,
+                contraction="norm_product" if self.cfg.credit_source == "norm_product" else "dot",
                 min_response_tokens=self.cfg.min_response_tokens,
                 token_chunk_size=self.cfg.token_chunk_size,
                 vocab_chunk_size=self.cfg.vocab_chunk_size))
@@ -814,7 +840,8 @@ class VPOTrainer:
             raise ValueError("Sampled tokens must belong to the policy output support")
         phase["generation_sec"] = elapsed_phase(tp)
         old_logits = None
-        if self.cfg.method == "vpo_rm" and self.cfg.credit_microbatch_responses == 0:
+        rm_gradient_credit = self.cfg.method == "vpo_rm" and self.cfg.credit_source in GRADIENT_CREDIT_SOURCES
+        if rm_gradient_credit and self.cfg.credit_microbatch_responses == 0:
             tp = time.monotonic()
             with torch.no_grad():
                 old_logits = actor_response_logits(self.actor, input_ids, full_mask, positions, rmask,
@@ -825,7 +852,7 @@ class VPOTrainer:
         rewards, grads, rid, rmask_full = self._reward_batch(
             input_ids, full_mask, positions, responses, rmask,
             [p for p in prompts for _ in range(self.cfg.group_size)])
-        phase["reward_model_gradient_sec" if self.cfg.method == "vpo_rm"
+        phase["reward_model_gradient_sec" if rm_gradient_credit
               else "reward_model_forward_sec"] = elapsed_phase(tp)
         B = rewards.shape[0]
         group_ids = torch.arange(B, device=self.reward_device) // self.cfg.group_size
@@ -893,7 +920,30 @@ class VPOTrainer:
             json.dumps(reward_rows, allow_nan=False))
         ref_logp = None
         entropy = None
-        if self.cfg.method == "vpo_rm":
+        if self.cfg.method == "vpo_rm" and not rm_gradient_credit:
+            # Ablation control: identical loss, KL, freezing, band and budget,
+            # but the token weights carry no reward-model information.
+            from .core import Credit, random_credit
+            tp = time.monotonic()
+            entropy = torch.zeros(responses.shape, dtype=torch.float32, device=self.actor_device)
+            old_logp = self._old_logp_microbatch(input_ids, full_mask, positions, responses, rmask,
+                                                 entropy_out=entropy)
+            if self.cfg.kl_reference == "init":
+                ref_logp = self._reference_logp(input_ids, full_mask, positions, responses, rmask)
+            phase["actor_old_logp_sec"] = elapsed_phase(tp)
+            tp = time.monotonic()
+            credit = random_credit(
+                advantages.to(self.actor_device), rmask, self.cfg.tau,
+                credit_lambda=self.cfg.credit_lambda, generator=self._credit_generator,
+                source=self.cfg.credit_source, token_ids=responses,
+                freeze_stop_tokens=self.cfg.freeze_stop_tokens,
+                freeze_structural=self.cfg.freeze_structural,
+                stop_token_ids=self.stop_token_ids, structural_token_ids=self.structural_token_ids,
+                fixed_weight_mask=getattr(self, "_reward_fixed_weight_mask",
+                                          torch.zeros_like(rmask)).to(self.actor_device))
+            cache = type("Cache", (), {"old_logp": old_logp, "credit": credit})
+            phase["credit_cache_sec"] = elapsed_phase(tp)
+        elif self.cfg.method == "vpo_rm":
             if self.cfg.credit_microbatch_responses:
                 cache, entropy, credit_phase = self._credit_cache_microbatch(
                     input_ids, full_mask, positions, responses, rmask, grads, advantages, scales)
@@ -910,10 +960,13 @@ class VPOTrainer:
                                            structural_token_ids=self.structural_token_ids,
                                            fixed_weight_mask=getattr(self, "_reward_fixed_weight_mask", torch.zeros_like(rmask)).to(self.actor_device),
                                            policy_temperature=self.cfg.temperature,
+                                           contraction="norm_product" if self.cfg.credit_source == "norm_product" else "dot",
                                            min_response_tokens=self.cfg.min_response_tokens,
                                            token_chunk_size=self.cfg.token_chunk_size,
                                            vocab_chunk_size=self.cfg.vocab_chunk_size)
                 phase["credit_cache_sec"] = elapsed_phase(tp)
+            if self.cfg.credit_source == "shuffle":
+                cache = replace(cache, credit=shuffle_credit(cache.credit, rmask, generator=self._credit_generator))
             if self.cfg.kl_reference == "init":
                 tp = time.monotonic()
                 ref_logp = self._reference_logp(input_ids, full_mask, positions, responses, rmask)

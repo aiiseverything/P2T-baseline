@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "slides": 5,
+  "overview_cases": 4,
+  "saved_tokens": 76,
+  "overview_token_rectangles": 76,
+  "embedded_images": 0,
+  "editable": [
+    "response text",
+    "titles",
+    "prompt summaries",
+    "metadata",
+    "individual token highlights",
+    "colorbar",
+    "rules"
+  ],
+  "fonts": [
+    "Arial",
+    "Times New Roman",
+    "Courier New"
+  ],
+  "source_json_sha256": "9afca54ee0e4bd5889e6e257b81e116a8054ce039d48b3465ed8c039dfdfed38",
+  "pptx_sha256": "be81b2d72933871fa016edfd76772297b8cf5da4a199c4f2276482d9550f43c0",
+  "note": "Slide1 is the complete paper figure; slides2\u20135 are enlarged cases. Full source cases and token weights are in slide notes and the companion JSON/CSV.",
+  "render_validation": {
+    "application": "LibreOffice Impress 7.3.7",
+    "exported_pdf_pages": 5,
+    "all_pages_visually_reviewed": true,
+    "preview_pdf": "fig6_credit_case_heatmaps_editable_preview.pdf",
+    "preview_png": "fig6_credit_case_heatmaps_editable_preview.png",
+    "native_microsoft_powerpoint_tested": false
+  }
+}

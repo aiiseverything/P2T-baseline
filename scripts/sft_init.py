@@ -27,6 +27,8 @@ from torch.utils.data import DataLoader, Dataset
 try:
     from scripts.sft_response_tokens import (
         build_response_eos_spec,
+        configure_sft_pad_token,
+        install_chat_template,
         response_labels,
         rewrite_response_eos,
         supervised_token_sha256,
@@ -34,6 +36,8 @@ try:
 except ModuleNotFoundError:  # direct invocation: python scripts/sft_init.py
     from sft_response_tokens import (
         build_response_eos_spec,
+        configure_sft_pad_token,
+        install_chat_template,
         response_labels,
         rewrite_response_eos,
         supervised_token_sha256,
@@ -80,6 +84,35 @@ def load_chosen_pairs(parquet_path: str, validation_size: int,
     if exclusion is not None:
         split["benchmark_exclusion"] = exclusion
     return out, split
+
+
+def load_pair_selection(path, available_pairs):
+    """Select frozen examples without bypassing train/benchmark exclusion.
+
+    Match the complete prompt and response, preserving the selection's order.
+    This allows another tokenizer/model to use the exact same SFT examples.
+    """
+    from vpo_rm.data import normalize_prompt
+
+    rows = json.loads(Path(path).read_text())
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("selection must contain a nonempty list of training pairs")
+    available = set(available_pairs)
+    selected, seen = [], set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"prompt", "response"}
+                or not all(isinstance(row[key], str) and row[key].strip()
+                           for key in ("prompt", "response"))):
+            raise ValueError("selection requires nonempty prompt/response strings")
+        key = normalize_prompt(row["prompt"])
+        if key in seen:
+            raise ValueError("selection contains duplicate normalized prompts")
+        seen.add(key)
+        pair = (row["prompt"], row["response"])
+        if pair not in available:
+            raise ValueError("selected training pair is absent from the clean training split")
+        selected.append(pair)
+    return selected
 
 
 class SFTDataset(Dataset):
@@ -277,6 +310,9 @@ def main():
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--max-examples", type=int, default=0,
                    help="Random (seeded) subsample of the train pairs; 0 = all")
+    p.add_argument("--selection-file", type=Path,
+                   help="Frozen prompt/response JSON selection; every pair must "
+                        "belong to the clean training split (excludes --max-examples)")
     p.add_argument("--learning-rate", type=float, default=1e-4)
     p.add_argument("--micro-batch", type=int, default=4)
     p.add_argument("--grad-accum", type=int, default=8)
@@ -292,12 +328,20 @@ def main():
                         "(the configured terminator); 1.0 = standard CE")
     p.add_argument("--response-eos", choices=["chat_template", "native"],
                    default="native",
-                   help="response terminator to supervise; native replaces only "
-                        "the final assistant <|im_end|> with tokenizer EOS")
+                   help="response terminator to supervise; native uses the "
+                        "tokenizer EOS at the final assistant boundary")
     p.add_argument("--allow-benchmark-overlap", action="store_true",
                    help="historical reproduction only: do not exclude final benchmarks")
+    p.add_argument("--chat-template-file", type=Path, default=None,
+                   help="pinned chat template installed on a tokenizer that ships "
+                        "without one (e.g. a base checkpoint); an existing different "
+                        "template is never replaced")
+    p.add_argument("--chat-template-sha256", default=None,
+                   help="required SHA256 of --chat-template-file contents")
     p.add_argument("--device", default="cuda:0")
     args = p.parse_args()
+    if args.chat_template_sha256 is not None and args.chat_template_file is None:
+        p.error("--chat-template-sha256 requires --chat-template-file")
     if args.output is None:
         args.output = default_sft_output(args.model)
     if args.micro_batch < 1:
@@ -308,6 +352,8 @@ def main():
         p.error("--epochs must be finite and positive")
     if not math.isfinite(args.eos_weight) or args.eos_weight <= 0:
         p.error("--eos-weight must be finite and positive")
+    if args.selection_file is not None and args.max_examples:
+        p.error("--selection-file and --max-examples cannot be combined")
     out = prepare_sft_output(args.output)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -315,15 +361,25 @@ def main():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    chat_template_sha256 = None
+    if args.chat_template_file is not None:
+        chat_template_sha256 = install_chat_template(
+            tokenizer, args.chat_template_file.read_text(encoding="utf-8"),
+            args.chat_template_sha256)
+        print(f"chat template: installed from {args.chat_template_file} "
+              f"sha256={chat_template_sha256}", flush=True)
+    if not tokenizer.chat_template:
+        raise ValueError("tokenizer has no chat template; pass --chat-template-file")
+    configure_sft_pad_token(tokenizer)
     response_eos_spec = build_response_eos_spec(tokenizer, args.response_eos)
     print(f"response EOS: mode={response_eos_spec.mode} "
           f"id={response_eos_spec.actual_eos_id}", flush=True)
     pairs, split = load_chosen_pairs(
         args.dataset_path, validation_size=2000,
         exclude_benchmarks=not args.allow_benchmark_overlap)
-    if args.max_examples and len(pairs) > args.max_examples:
+    if args.selection_file is not None:
+        pairs = load_pair_selection(args.selection_file, pairs)
+    elif args.max_examples and len(pairs) > args.max_examples:
         pairs = random.Random(args.seed).sample(pairs, args.max_examples)
     if args.limit:
         pairs = pairs[:args.limit]
@@ -342,6 +398,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, trust_remote_code=True).to(args.device)
     model.config.pad_token_id = tokenizer.pad_token_id
+    model.generation_config.pad_token_id = tokenizer.pad_token_id
     model = get_peft_model(model, LoraConfig(
         r=64, lora_alpha=128, lora_dropout=0.0, bias="none", task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
@@ -450,8 +507,27 @@ def main():
     model.save_pretrained(out)
     tokenizer.save_pretrained(out)
     payload = hashlib.sha256("\n".join(f"{p}|{c[:64]}" for p, c in pairs).encode()).hexdigest()
+    config = dict(vars(args), selection_file=(str(args.selection_file)
+                                             if args.selection_file is not None else None),
+                  chat_template_file=(str(args.chat_template_file)
+                                      if args.chat_template_file is not None else None),
+                  chat_template_sha256=chat_template_sha256)
     (out / "sft_manifest.json").write_text(json.dumps({
-        "config": vars(args), "dataset_stats": ds.stats, "data_sha256": payload,
+        "config": config, "dataset_stats": ds.stats, "data_sha256": payload,
+        "full_pairs_sha256": hashlib.sha256(json.dumps(
+            pairs, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+        "selection_file_sha256": (hashlib.sha256(args.selection_file.read_bytes()).hexdigest()
+                                  if args.selection_file is not None else None),
+        "token_protocol": {
+            "bos_token_id": tokenizer.bos_token_id,
+            "pad_token_id": tokenizer.pad_token_id,
+            "stop_token_ids": list(monitor_stop_token_ids(tokenizer)),
+            "template_response_eos_id": response_eos_spec.template_eos_id,
+            "response_eos_id": response_eos_spec.actual_eos_id,
+            "trailing_ids": list(response_eos_spec.trailing_ids),
+            "chat_template_sha256": hashlib.sha256(
+                tokenizer.chat_template.encode()).hexdigest(),
+        },
         "split": split,
         "training_schedule": {
             "microbatches": len(schedule), "optimizer_steps": steps_total,

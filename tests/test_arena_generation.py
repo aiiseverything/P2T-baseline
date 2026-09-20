@@ -40,6 +40,8 @@ def generation_stack(tmp_path, monkeypatch):
 
     class Tokenizer:
         eos_token_id = 2
+        eos_token = '<eos>'
+        pad_token_id = None
         all_special_ids = [2]
         def get_vocab(self): return {'a': 1, '<eos>': 2}
         def encode(self, text, add_special_tokens=False): return [1] * 3
@@ -103,6 +105,11 @@ def test_shared_engine_official_rows_and_verified_cache(generation_stack):
     assert config['policy']['metadata'][0]['path'] == str(stack.profile)
     assert config['engine']['max_model_len'] == 16
     assert 'third_party/arena_hard/utils/add_markdown_info.py' in config['sources']
+    from scripts.eval_artifacts import fingerprint
+    assert stack.engines[0]['tokenizer'] == stack.args.model
+    assert config['tokenizer'] == {'source': stack.args.model,
+                                   'fingerprint': fingerprint(stack.args.model, full_weights=False)}
+    assert config['tokenizer']['fingerprint'] == config['model']
     stack.arena.generate_all(stack.args)
     assert len(stack.engines) == 1 and len(stack.calls) == 2
 
@@ -162,3 +169,52 @@ def test_answer_validation_rejects_wrong_binding(generation_stack, mutation):
     else: rows[0]['model'] = 'other model'
     with pytest.raises(ValueError):
         s.arena.validate_answers(rows, s.questions, 'rl')
+
+
+def test_tokenizer_override_renders_prompts_and_binds_its_source(generation_stack, tmp_path, monkeypatch):
+    """A base checkpoint without a chat template renders with its saved SFT tokenizer."""
+    import transformers
+    from scripts.eval_artifacts import fingerprint
+    s = generation_stack
+    saved = tmp_path / 'sft-adapter'; saved.mkdir()
+    (saved / 'tokenizer_config.json').write_text('{"chat_template": "pinned"}')
+    (saved / 'adapter_model.safetensors').write_bytes(b'sft weights')
+    original = transformers.AutoTokenizer.from_pretrained
+    sources = []
+    def from_pretrained(source, *args, **kwargs):
+        sources.append(str(source))
+        return original(source, *args, **kwargs)
+    monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained', from_pretrained)
+    s.args.tokenizer = str(saved)
+    s.arena.generate_all(s.args)
+    assert sources == [str(saved)]
+    assert s.engines[0]['model'] == s.args.model and s.engines[0]['tokenizer'] == str(saved)
+    config = json.loads((Path(s.args.output) / 'manifests/base.json').read_text())['config']
+    expected = fingerprint(saved, full_weights=False)
+    assert config['tokenizer'] == {'source': str(saved), 'fingerprint': expected}
+    weights = next(row for row in expected['files'] if row['name'] == 'adapter_model.safetensors')
+    assert 'sha256' not in weights and weights['size'] == len(b'sft weights')
+    assert config['tokenizer']['source'] != config['model']['path']
+    s.arena.generate_all(s.args)
+    assert len(s.calls) == 2
+    (saved / 'tokenizer_config.json').write_text('{"chat_template": "changed"}')
+    with pytest.raises(ValueError, match='different|changed'):
+        s.arena.generate_all(s.args)
+    assert len(s.calls) == 2
+
+
+def test_offline_generation_config_matches_gpu_cache_identity(generation_stack):
+    """Preparation scripts rebuild the exact cache identity with supplied runtime versions."""
+    from types import SimpleNamespace as NS
+    from scripts.eval_artifacts import fingerprint
+    s = generation_stack
+    s.arena.generate_all(s.args)
+    manifest = json.loads((Path(s.args.output) / 'manifests/rl.json').read_text())['config']
+    engine = s.arena.engine_arguments(s.args, 'float32', s.args.model)
+    assert engine == s.engines[0]
+    offline = s.arena.generation_config(
+        NS(dataset=s.args.dataset, seed=42, max_tokens=8), 'rl', fingerprint(s.adapter),
+        manifest['policy'], engine, model_fingerprint=fingerprint(s.args.model, full_weights=False),
+        tokenizer_provenance=manifest['tokenizer'], stop_ids=[2], support_summary=manifest['output_support'],
+        prompt_ids=[[1] * 3] * 500, runtime=manifest['runtime_versions'])
+    assert offline == manifest

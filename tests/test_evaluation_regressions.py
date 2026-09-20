@@ -207,15 +207,25 @@ def test_real_eval_cli_all_samples_and_cache(benchmark, monkeypatch, tmp_path):
             pass
         def generate(self, prompts, params, **kwargs):
             calls.append(params)
-            return [SimpleNamespace(outputs=[SimpleNamespace(text='#### 42', token_ids=[1] * (3 - s),
-                         finish_reason='stop', stop_reason=2) for s in range(params.n)]) for _ in prompts]
+            return [SimpleNamespace(prompt_token_ids=(prompt['prompt_token_ids']
+                if isinstance(prompt, dict) else [1]), outputs=[SimpleNamespace(
+                text='#### 42', token_ids=[1] * (3 - s), finish_reason='stop', stop_reason=2)
+                for s in range(params.n)]) for prompt in prompts]
     class Tokenizer:
         eos_token_id = 2
+        eos_token = '<eos>'
+        pad_token = None
+        pad_token_id = None
         all_special_ids = [2]
         def get_vocab(self):
             return {'a': 1, '<eos>': 2}
         def convert_tokens_to_ids(self, token):
             return self.get_vocab().get(token)
+        def encode(self, text, add_special_tokens=False):
+            return [1]
+        def __call__(self, text, *, add_special_tokens):
+            assert not add_special_tokens
+            return {'input_ids': [1]}
     tokenizer = Tokenizer()
     monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(LLM=Engine, SamplingParams=lambda **kw: SimpleNamespace(**kw)))
     monkeypatch.setitem(sys.modules, 'vllm.lora.request', SimpleNamespace(LoRARequest=lambda *args: args))
@@ -279,7 +289,8 @@ def test_checkpoint_adapter_ids_unique_across_runs(monkeypatch, tmp_path):
         def generate(self, prompts, params, lora_request):
             requests.append(lora_request)
             sampling.append(params)
-            return [SimpleNamespace(outputs=[SimpleNamespace(token_ids=[1, 2])])]
+            return [SimpleNamespace(prompt_token_ids=prompts[0]['prompt_token_ids'],
+                                    outputs=[SimpleNamespace(token_ids=[1, 2])])]
     monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(
         LLM=Engine, SamplingParams=lambda **kw: SimpleNamespace(**kw)))
     monkeypatch.setitem(sys.modules, 'vllm.lora.request', SimpleNamespace(LoRARequest=lambda *a: a))
@@ -288,8 +299,16 @@ def test_checkpoint_adapter_ids_unique_across_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(module, '_stop_ids', lambda _: [2], raising=False)
     monkeypatch.setattr(module, 'validate_adapter_base', lambda *a: None, raising=False)
     import transformers
+    class Tokenizer:
+        eos_token = 'b'
+        eos_token_id = 2
+        def get_vocab(self):
+            return {'a': 1, 'b': 2}
+        def __call__(self, text, *, add_special_tokens):
+            assert not add_special_tokens
+            return {'input_ids': [1]}
     monkeypatch.setattr(transformers.AutoTokenizer, 'from_pretrained',
-                        lambda *a, **kw: SimpleNamespace(get_vocab=lambda: {'a': 1, 'b': 2}))
+                        lambda *a, **kw: Tokenizer())
     monkeypatch.setattr(transformers.AutoConfig, 'from_pretrained',
                         lambda *a, **kw: SimpleNamespace(vocab_size=3))
     args = SimpleNamespace(model='toy', max_num_seqs=1, seed=1, max_tokens=8)

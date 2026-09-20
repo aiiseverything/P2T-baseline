@@ -108,7 +108,7 @@ def test_each_generation_request_keeps_its_own_probabilities():
 
 def test_main_requests_and_returns_probabilities_for_calibration_and_every_training_rpc(tmp_path, monkeypatch):
     args = profile.parse_args(['--output-dir', str(tmp_path / 'train'), '--max-rollouts', '1'])
-    cfg = SimpleNamespace(method='grpo', prompts_per_rollout=8, group_size=2,
+    cfg = SimpleNamespace(method='grpo', prompts_per_rollout=8, group_size=2, microbatch_responses=1,
                           max_response_tokens=4, temperature=1., min_response_tokens=0,
                           top_p=1., top_k=0, length_reward_mode='soft',
                           policy_head_dtype='float32', rollout_importance_correction=True)
@@ -127,9 +127,9 @@ def test_main_requests_and_returns_probabilities_for_calibration_and_every_train
         filtered_prompt_count=0, filter_prompts=lambda values: values, sampling_manifest=lambda: {},
         _render_chat_prompt=lambda tokenizer, prompt: prompt, save_checkpoint=lambda step: None)
     def encode(prompts):
-        assert len(prompts) == 2
-        return {'input_ids': torch.tensor([[11, 12], [0, 21]]),
-                'attention_mask': torch.tensor([[1, 1], [0, 1]])}, list(prompts)
+        assert len(prompts) in (1, 2)
+        return {'input_ids': torch.tensor([[11, 12], [0, 21]])[:len(prompts)],
+                'attention_mask': torch.tensor([[1, 1], [0, 1]])[:len(prompts)]}, list(prompts)
     trainer._encode_prompts = encode
     observed = []
     trainer.prepare_length_reward = lambda prompts: observed.append(trainer.rollout(prompts[:2]))
@@ -162,6 +162,8 @@ def test_main_requests_and_returns_probabilities_for_calibration_and_every_train
     profile.main()
     assert len(observed) == 3 and all(len(rollout) == 8 for rollout in observed)
     assert all(request['return_logprobs'] is True for request in requests[:3])
+    assert all(request.get('prompt_token_ids') == [[11, 12], [21]] for request in requests[:3])
+    assert requests[3]['prompt_token_ids'] == [[11, 12]]
     assert [float(rollout[7][0, 0]) for rollout in observed] == pytest.approx([-1.1, -2.1, -3.1])
     record = json.loads((tmp_path / 'train/profile_metrics.jsonl').read_text())
     assert len(record['generation_requests']) == 2

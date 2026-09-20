@@ -169,7 +169,7 @@ def test_custom_reference_is_used_by_style_design_and_probability_conversion():
 
 
 @pytest.fixture
-def custom_layout(official_layout):
+def custom_layout(official_layout, request):
     from scripts import judge_arena_hard as judge
     q, a, j, write = official_layout
     old = a / f'{scorer().BASELINE}.jsonl'
@@ -191,7 +191,9 @@ def custom_layout(official_layout):
     rows = scorer()._jsonl(a / f'{CUSTOM_BASELINE}.jsonl')
     for path in j.glob('*.jsonl'):
         path.unlink()
-    protocol = judge.load_protocol(judge.ROOT / 'third_party/arena_hard', baseline_model=CUSTOM_BASELINE)
+    judge_model = getattr(request, 'param', 'gpt-4.1')
+    protocol = judge.load_protocol(judge.ROOT / 'third_party/arena_hard', baseline_model=CUSTOM_BASELINE,
+                                   judge_model=judge_model)
     run = judge.JudgeRun(j, judge.load_jsonl(q), rows,
         {m: judge.load_jsonl(a / f'{m}.jsonl') for m in scorer().MODELS}, protocol)
     run.prepare()
@@ -201,11 +203,14 @@ def custom_layout(official_layout):
                 request = run.request(tag, uid, order)
                 path = run.game_path(tag, uid, order)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps({'tag': tag, 'uid': uid, 'order': order,
+                record = {'tag': tag, 'uid': uid, 'order': order,
                     'status': 'valid', 'request': request, 'request_sha256': judge.digest(request),
                     'baseline_model': CUSTOM_BASELINE, 'protocol_sha256': judge.digest(protocol),
                     'score': 'A>B', 'answer': 'Offline synthetic verdict [[A>B]]', 'finish_reason': 'stop',
-                    'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3}}))
+                    'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3}}
+                if judge_model != 'gpt-4.1':
+                    record['judge_model'] = judge_model
+                path.write_text(json.dumps(record))
     run.export()
     return q, a, j, write, run
 
@@ -234,6 +239,40 @@ def test_custom_complete_inputs_require_actual_requests_and_settings(custom_layo
     state.write_text(json.dumps(identity))
     with pytest.raises(ValueError, match='provenance'):
         scorer().load_inputs(q, a, j, baseline_model=CUSTOM_BASELINE)
+
+
+@pytest.mark.parametrize('custom_layout', ['gpt-4o'], indirect=True)
+def test_custom_judge_scores_actual_gpt4o_requests_and_marks_protocol(custom_layout):
+    q, a, j, _, run = custom_layout
+    output = q.parent / 'gpt4o-scores'
+    result = scorer().main(['--questions', str(q), '--answers-dir', str(a), '--judgments-dir', str(j),
+        '--output', str(output), '--baseline-model', CUSTOM_BASELINE, '--judge', 'gpt-4o'])
+    assert result['judge'] == 'gpt-4o'
+    assert result['official_judge_model'] == 'gpt-4.1'
+    assert result['uses_official_judge'] is False
+    assert result['protocol'] == 'arena_hard_v2_custom_judge_custom_baseline_combined_controls_v1'
+    assert result['baseline'] == CUSTOM_BASELINE and result['uses_official_baseline'] is False
+    assert result['coverage']['total_games'] == 6000
+    assert len(result['inputs_sha256']) == 6021
+    with pytest.raises(ValueError, match='provenance'):
+        scorer().load_inputs(q, a, j, baseline_model=CUSTOM_BASELINE)
+    path = run.game_path('base', 'q000', 0)
+    record = json.loads(path.read_text())
+    record['request']['model'] = 'gpt-4.1'
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match='game identity'):
+        scorer().load_inputs(q, a, j, judge='gpt-4o', baseline_model=CUSTOM_BASELINE)
+
+
+def test_custom_judge_official_baseline_rejects_relabelled_exports(official_layout):
+    q, a, j, write = official_layout
+    for path in j.glob('*.jsonl'):
+        rows = scorer()._jsonl(path)
+        for row in rows:
+            row['judge'] = 'gpt-4o'
+        write(path, rows)
+    with pytest.raises(ValueError, match='provenance'):
+        scorer().load_inputs(q, a, j, judge='gpt-4o')
 
 
 def test_custom_rejects_old_game_records_even_with_identical_answer_text(custom_layout):

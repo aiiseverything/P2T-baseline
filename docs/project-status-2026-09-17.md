@@ -112,3 +112,28 @@ PS/PL 是 prompt-level strict/loose accuracy，IS/IL 是 instruction-level stric
 GitHub 保存源代码、配置、测试和文档；共享项目目录保留现有模型、数据和实验产物。`/data/VPO-RM` 用于新增模型和存储维护记录，`/data` 是 NFS 挂载，rjob 的访问与迁移路径尚须单独验证。已授权清理两批重构前旧权重，合计原占用约 **179.95 GiB**；当前 canonical checkpoint、SFT 原件及初始化副本保留。尚未将全部现有权重搬到 `/data`。盘点与删除审计见 `/data/VPO-RM/STORAGE_INVENTORY.md` 和 `.maintenance/`；容量随其他写入变化，部署前应重新查询。
 
 SSH/A6000 部署与资产准备请使用 [部署交接文档](ssh-a6000-handoff.md)。
+
+## GPT-4o裁判全量续跑（2026-09-18 00:03 HKT）
+
+用户已明确允许忽略裁判格式失败并在成绩中排除对应case。`runs/arena-hard-v2-gpt4o-judge-20260917` 已恢复32并发全量判分，复用3000条原回答和59个有效判分；不改裁判提示词。任一顺序失败时，该模型该题两个顺序一起退出计分，同时提供六模型共同有效题目上的成绩。新增状态见`active_judging.json`、`exclusions_progress.json`和`continuation-with-exclusions/controller_state.json`；自动CPU计分已接续。最终胜率尚未产出。详细规则见[GPT-4o失败排除记录](arena-gpt4o-exclusions-2026-09-17.md)。
+
+
+## Llama SFT完成（2026-09-18 00:14 HKT）
+
+Llama-3.1-8B-Instruct的2500条、2 epoch、157步LoRA SFT已完成，最终GPU重载通过。生成检查因fork/OpenMP卡住后改用spawn独立补跑，任务`llama31-sft-check-spawn-0918-72366407`已Succeeded；100条原始/SFT比较回答全部正常结束。SFT的25条train/test平均长度为207.12/292.36 tokens，均无2048截断。权重在`/data/VPO-RM/models/sft-llama31-8b-instruct-clean2k5e2-20260917`；详情见[训练与完成记录](llama-sft-alignment-2026-09-17.md)。这些是新Llama权重的小样本生成检查，本文之前的六模型benchmark表仍对应Qwen体系。原先“Llama下载尚未验收、NFS待验证”的段落是早期快照；本次actor已通过实际训练/重载，NFS挂载已通过远程校验并用于GPU任务。
+
+
+2026-09-18 00:17 HKT更新：GPT-4o全量判分在1148/6000完成后因只读账单查询失败暂停，已保存全部记录并恢复32并发，从剩余4852条继续。仅免费账单读取新增最多3次有界重试；已请求的有效/格式失败game均不重判。自动计分watcher也已接续。详见[恢复记录](arena-gpt4o-exclusions-2026-09-17.md)。
+
+
+## Llama-3.1-8B base SFT 完成（2026-09-19 01:45 HKT）
+
+用 pretrained `Llama-3.1-8B`（ModelScope 镜像，13 个文件 SHA256 对齐上游 revision d04e592b）做了与 Qwen native-EOS SFT 同数据、同超参的 LoRA SFT：2500 条冻结样本、2 epoch、157 步，rjob `llama31-base-sft-0919-2373829` Succeeded。base 没有 chat template，注入了与 Instruct/RM 字节一致的 Llama 3.1 模板；监督终止符是 `<|end_of_text|>`（128001）而非 `<|eot_id|>`，因为 base 权重里 `<|eot_id|>` 等特殊 token 的 embedding 为零且 lm_head 行与全部 reserved token 共用一行，LoRA 无法学会输出它。25+25 探针中 SFT 回答 50/50 以 128001 正常结束、无触顶（平均 199/263 token），base 对照有 13/50 触顶。权重在 `/data/VPO-RM/models/sft-llama31-8b-base-clean2k5e2-20260919`，套件与证据在 `/data/VPO-RM/runs/llama31-base-sft-20260919/`，详情见 `/data/VPO-RM/code/docs/llama-base-sft-2026-09-19.md`。这份权重尚未用于任何 RL 或 benchmark；做 RL 前需先把 Llama 协议检查中写死的 actor EOS 128009 泛化到 128001。
+
+## Llama-3.1-8B base 的 RL 启动（2026-09-19 02:22 HKT）
+
+从 `sft-llama31-8b-base-clean2k5e2-20260919` 初始化的 GRPO 与 VPO λ=4 已进入 RL 流水线：套件 `runs/llama31-base-rl-20260919/`（共享存储），GRPO rjob `llama-base-rl-grpo-2cc8f0341d-28415773` 先跑共享 GPU gate，λ4 由协调进程在 gate 通过后提交。为此 Llama launcher 增加了 `base` profile（actor EOS 128001、只跑 grpo/lam4、容量检查在 lam4、金丝雀 `final_word` 规则），协议检查器支持 `--actor-eos`。训练设置与 Llama-Instruct v3 完全一致。结果尚未产出；详见 `/data/VPO-RM/code/docs/llama-base-sft-2026-09-19.md`。
+
+## 随机 credit 消融启动（2026-09-19 05:02 HKT）
+
+与 canonical VPO λ=4 单变量对照：token 权重不再来自 RM 输入梯度，而是把方向分换成标准正态噪声后走同一个 λ 区间带分配器（`credit_source=random_direction`）。其余全部继承 canonical（SFT 初始化、σ₀=3.0323、采样与优化设置），套件 `runs/rl-ablation-random-credit-20260919/`，rjob `rl-abl-randdir-c3fe46666d-46879224`。详见 `docs/ablation-random-credit-2026-09-19.md`。

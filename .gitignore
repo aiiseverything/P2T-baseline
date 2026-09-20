@@ -11,3 +11,6 @@ datasets/
 .hf_cache/
 .vllm-extra/
 .skills/
+.cache/
+.maintenance/
+.mplconfig/

@@ -21,11 +21,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from vpo_rm.integration import (vllm_sampling_kwargs, generation_payload,
                                 checked_sampling_params, sampling_summary)
+from vpo_rm.token_policy import (load_actor_tokenizer, resolve_actor_tokenizer_source,
+                                 tokenize_rendered_prompts)
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
+    p.add_argument("--tokenizer", default="", help="Actor tokenizer source; defaults to the base model")
     p.add_argument("--socket", required=True)
     p.add_argument("--max-num-seqs", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
@@ -54,16 +57,16 @@ def main() -> None:
     # a reserved id crashed the credit integrity check (p9e rollout 85, p9g
     # smoke rollout 1).  Ban them here so generation and training share the
     # same support, per the contract in vpo_rm/alignment.py.
-    from transformers import AutoConfig, AutoTokenizer
-    _tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    _tok.pad_token_id = _tok.eos_token_id
+    from transformers import AutoConfig
+    tokenizer_source = resolve_actor_tokenizer_source(args.model, tokenizer_name=args.tokenizer)
+    _tok = load_actor_tokenizer(args.model, tokenizer_name=tokenizer_source)
     _vocab_size = AutoConfig.from_pretrained(args.model, trust_remote_code=True).vocab_size
     _presence = float(os.environ.get("PRESENCE_PENALTY", "0.0"))
     if _presence != 0:
         raise ValueError("PRESENCE_PENALTY is unsupported by the on-policy training protocol")
 
     llm = LLM(
-        model=args.model, dtype="bfloat16", trust_remote_code=True,
+        model=args.model, tokenizer=tokenizer_source, dtype="bfloat16", trust_remote_code=True,
         enable_lora=True, max_lora_rank=64, max_loras=2, max_cpu_loras=2,
         seed=args.seed,
         generation_config="vllm",
@@ -91,7 +94,7 @@ def main() -> None:
                     if req.get("shutdown"):
                         conn.sendall(b'{"ok":true}\n')
                         return
-                    prompts = req["prompts"]
+                    prompts = tokenize_rendered_prompts(_tok, req["prompts"], req.get("prompt_token_ids"))
                     adapter = req["adapter"]
                     adapter_id = int(req["adapter_id"])
                     probe = bool(req.get("probe", False))
@@ -102,8 +105,12 @@ def main() -> None:
                     )
                     t0 = time.monotonic()
                     generated = llm.generate(prompts, params, lora_request=request)
+                    actual_prompt_ids = [list(result.prompt_token_ids) for result in generated]
+                    if actual_prompt_ids != [prompt["prompt_token_ids"] for prompt in prompts]:
+                        raise RuntimeError("vLLM changed the explicit prompt token IDs")
                     payload = {"ok": True, **generation_payload(generated, sampling["stop_token_ids"],
                                include_logprobs=bool(req.get("return_logprobs", False))),
+                               "prompt_token_ids": actual_prompt_ids,
                                "sampling": sampling_summary(sampling),
                                "logprobs_mode": "processed_logprobs",
                                "engine_generation_sec": time.monotonic() - t0,
