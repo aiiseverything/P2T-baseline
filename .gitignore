@@ -19,4 +19,9 @@ datasets/
 # The CVPR paper and its extracted text stay local: this repository is public.
 paper/
 .setup_*.log
+.adapter_check.log
+.pytest_p2t.log
 *.pt
+
+# 3.1 GiB of pre-fetched CUDA wheels: fetched, never committed.
+.wheels/

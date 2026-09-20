@@ -247,6 +247,8 @@ def _stub_trainer(tmp_path, *, group_size=2, prompts=1, vocab=19, dim=8,
     trainer.adapter_id = 0
     trainer.sigma0 = 1.0
     trainer.filtered_prompt_count = 0
+    trainer.init_adapter_sha256 = ""
+    trainer._adapter_identity = {}
     trainer.started = time.monotonic()
     trainer.pusher = AutoPusher(enabled=False, every=0, remote="origin", branch="p2t-baseline",
                                 report_dir=trainer.report_dir, repo_root=tmp_path)

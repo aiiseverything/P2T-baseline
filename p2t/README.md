@@ -69,7 +69,7 @@ tensor that VPO-RM requires never exists here. That is most of why it fits on a
 
 ## Reading the curves
 
-`p2t_share_ess_mean` and `p2t_flat_response_fraction` decide whether the method
+`credit_ess_ratio` and `p2t_flat_response_fraction` decide whether the method
 is doing anything at all. Eq. (3) has no temperature, so if the attribution
 softmax is flat the token term becomes a per-response constant and the arm
 quietly degenerates into "GRPO with a shifted advantage". `p2t_bonus_over_advantage`

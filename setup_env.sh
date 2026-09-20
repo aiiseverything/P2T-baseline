@@ -25,12 +25,22 @@ uv venv --python 3.12 --allow-existing "${ROOT}/.venv"
 
 # The internal pip mirror (172.22.1.36) is unreachable from this host; the
 # public indexes are reachable and are what the lock was resolved against.
-# uv caches completed downloads, so a retry resumes rather than restarts.
+#
+# The CUDA wheels are pre-fetched from PyPI: the pytorch index links them to
+# pypi.nvidia.com, which sustains ~0.4 MB/s here against PyPI's ~23 MB/s.  With
+# --find-links uv takes the local copies and only the few packages PyPI does not
+# carry come over the slow origin.  uv caches completed downloads, so a retry
+# resumes rather than restarts.
+if [ ! -f "${ROOT}/.wheels/manifest.json" ] || [ "${PREFETCH:-1}" = "1" ]; then
+  python3 "${ROOT}/scripts/prefetch_cuda_wheels.py" || true
+fi
+
 for attempt in 1 2 3 4; do
   if uv pip sync --python "${ROOT}/.venv/bin/python" \
       --index-url https://pypi.org/simple \
       --extra-index-url https://download.pytorch.org/whl/cu129 \
       --index-strategy unsafe-best-match \
+      --find-links "${ROOT}/.wheels" \
       "${ROOT}/requirements/ssh-a6000-cu129.txt"; then
     break
   fi

@@ -163,6 +163,11 @@ class TrainerConfig:
             raise ValueError("sigma0 must be finite and positive")
         if not 0 <= c.min_response_tokens <= c.max_response_tokens:
             raise ValueError("require 0 <= min_response_tokens <= max_response_tokens")
+        if c.min_response_tokens:
+            # The parent's soft mode forbids a minimum length, and a nonzero one
+            # would additionally apply the legacy degeneracy floor that the
+            # sibling arms never apply.
+            raise ValueError("the soft length protocol requires min_response_tokens=0")
         if c.push_every < 0:
             raise ValueError("push_every must be nonnegative")
         if c.policy_head_dtype not in {"native", "float32"}:
@@ -210,6 +215,8 @@ class P2TTrainer:
         self.adapter_id = 0
         self.sigma0 = self.cfg.sigma0
         self.filtered_prompt_count = 0
+        self.init_adapter_sha256 = ""
+        self._adapter_identity = {}
         self.started = time.monotonic()
         self.pusher = AutoPusher(enabled=bool(self.cfg.push_every), every=self.cfg.push_every,
                                  remote=self.cfg.push_remote, branch=self.cfg.push_branch,
@@ -279,7 +286,37 @@ class P2TTrainer:
         for parameter in trainer.reward.parameters():
             parameter.requires_grad_(False)
         trainer._refuse_nonzero_dropout()
+        if c.init_adapter:
+            trainer._verify_init_adapter()
         return trainer
+
+    def _verify_init_adapter(self):
+        """Bind the SFT initialization to the actor it claims to fine-tune.
+
+        PEFT will happily mount an adapter on the wrong base and the run would
+        look healthy while training something nobody asked for.  The project
+        records the adapter's weight hash in every manifest; we do the same, so
+        the P2T arm can be shown to have started from the same bytes as its
+        siblings.
+        """
+        import hashlib
+        directory = Path(self.cfg.init_adapter)
+        config_path = directory / "adapter_config.json"
+        weights_path = directory / "adapter_model.safetensors"
+        if not config_path.is_file():
+            raise FileNotFoundError(f"init adapter has no adapter_config.json: {directory}")
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"init adapter has no adapter_model.safetensors: {directory}")
+        declared = json.loads(config_path.read_text()).get("base_model_name_or_path") or ""
+        if declared and Path(declared).name != Path(self.cfg.model_name).name:
+            raise ValueError(
+                f"init adapter was fitted to {declared!r}, but the actor is "
+                f"{self.cfg.model_name!r}")
+        digest = hashlib.sha256(weights_path.read_bytes()).hexdigest()
+        self.init_adapter_sha256 = digest
+        self._adapter_identity = {"init_adapter": str(directory),
+                                  "init_adapter_base": declared,
+                                  "init_adapter_sha256": digest}
 
     def _refuse_nonzero_dropout(self):
         """Sampler and trainer probabilities must match, so no dropout anywhere."""
@@ -591,14 +628,25 @@ class P2TTrainer:
         # FP32 head, so this delta should be numerically zero.  Whatever it is,
         # the importance weights would otherwise absorb it silently.
         logp_delta = (old_logp - rollout_logprobs)[rmask]
+        is_values = importance[rmask]
+        is_quantiles = torch.quantile(is_values, torch.tensor([.01, .5, .99], device=is_values.device))
+        error_quantiles = torch.quantile(logp_delta.abs(), torch.tensor([.5, .99],
+                                                                       device=logp_delta.device))
+        # The project's startup gate reads this exact vocabulary, so a run that
+        # omits a key cannot be validated by the same tooling as its siblings.
         probability_metrics = {
             "rollout_logp_abs_error_mean": float(logp_delta.abs().mean()),
+            "rollout_logp_abs_error_p50": float(error_quantiles[0]),
+            "rollout_logp_abs_error_p99": float(error_quantiles[1]),
             "rollout_logp_abs_error_max": float(logp_delta.abs().max()),
-            "rollout_is_mean": float(importance[rmask].mean()),
-            "rollout_is_max": float(importance[rmask].max()),
+            "rollout_is_min": float(is_values.min()),
+            "rollout_is_mean": float(is_values.mean()),
+            "rollout_is_p01": float(is_quantiles[0]),
+            "rollout_is_p50": float(is_quantiles[1]),
+            "rollout_is_p99": float(is_quantiles[2]),
+            "rollout_is_max": float(is_values.max()),
             "rollout_is_ess_ratio": float(
-                importance[rmask].sum().square()
-                / (importance[rmask].numel() * importance[rmask].square().sum())),
+                is_values.sum().square() / (is_values.numel() * is_values.square().sum())),
             "rollout_direct_ratio_clip_fraction": float(
                 ((importance < 1 - self.cfg.clip_eps)
                  | (importance > 1 + self.cfg.clip_eps))[rmask].float().mean()),
@@ -706,6 +754,7 @@ class P2TTrainer:
         metrics.update(self._p2t_diagnostics(credit, attribution, raw_rewards, advantages, mask))
         metrics.update(alignment)
         metrics.update(selection)
+        metrics.update(self._adapter_identity)
         metrics.update(probability_metrics)
         # Sampling provenance: temperature, top-p/k, suppressed-token digest,
         # engine timing, adapter id.  The other arms record the equivalent, and
@@ -832,6 +881,12 @@ class P2TTrainer:
                                            for row, valid in zip(rollout[3], rollout[4])]
         (self.output_dir / f"rollout-{step}-tokens.json").write_text(json.dumps(rows))
         (self.output_dir / f"rollout-{step}-prompts.json").write_text(json.dumps(list(prompts)))
+        if rollout is not None:
+            lengths = rollout[4].sum(-1).tolist()
+            rows_path = self.output_dir / f"rollout-{step}-rewards.json"
+            rows_path.write_text(json.dumps([
+                {"length": int(length), "finish_reason": reason}
+                for length, reason in zip(lengths, rollout[6])]))
 
     def _log(self, metrics):
         with self.metrics_path.open("a") as handle:
@@ -846,7 +901,8 @@ class P2TTrainer:
             "resolved_config": asdict(self.cfg), "step": step,
             "reward_input_protocol": REWARD_INPUT_PROTOCOL,
             "p2t_protocol": P2T_APPROXIMATION, "total_tokens": self.total_tokens,
-            "null_token_id": self.null_token_id, "resume_supported": False},
+            "null_token_id": self.null_token_id, "resume_supported": False,
+            **self._adapter_identity},
             indent=2, default=str))
         return path
 
@@ -872,6 +928,28 @@ class P2TTrainer:
     def close(self):
         if self.generation is not None:
             self.generation.close()
+
+
+def check_fresh_output(output_dir) -> None:
+    """Reject a directory that already holds training artifacts.
+
+    This trainer has no resume protocol, so relaunching into an existing
+    directory would interleave two runs' metrics under duplicated rollout
+    numbers, overwrite the credit dumps and adapters of the first attempt, and
+    leave no marker saying the result is unanalysable.
+    """
+    path = Path(output_dir)
+    if not path.exists():
+        return
+    markers = ("metrics.jsonl", "length_reward_calibration.json", "data_split.json",
+               "vllm-adapters", "train.pid")
+    found = [name for name in markers if (path / name).exists()]
+    found += [entry.name for entry in path.glob("checkpoint-*")]
+    found += [entry.name for entry in path.glob("rollout-*-credit.pt")]
+    if found:
+        raise FileExistsError(
+            f"{path} already contains training artifacts {sorted(found)[:5]}; this trainer "
+            f"cannot resume, so choose a fresh --output-dir or delete the old run")
 
 
 def load_config(path) -> TrainerConfig:
@@ -907,9 +985,20 @@ def main(argv=None):
     if config.dry_run:
         print(json.dumps({"resolved_config": asdict(config.resolved())}, indent=2, default=str))
         return
+    check_fresh_output(config.output_dir)
     device_count = torch.cuda.device_count()
     if device_count < 2:
         raise RuntimeError("P2T training needs at least two visible GPUs: actor and reward model")
+    # `actor_device`/`reward_device` are indices into CUDA_VISIBLE_DEVICES, while
+    # `vllm_gpus` names physical cards.  If the two disagree the trainer would
+    # run on one set of GPUs and generation on another, possibly another job's.
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    expected = [str(index) for index in range(2 + config.vllm_tensor_parallel_size)]
+    if visible and [item.strip() for item in visible.split(",")] != expected:
+        raise RuntimeError(
+            f"CUDA_VISIBLE_DEVICES={visible!r} does not match the device plan "
+            f"{expected}; vllm_gpus={config.vllm_gpus} are physical ids while "
+            f"actor_device/reward_device are indices into the visible list")
     dataset_path = os.environ.get("P2T_DATASET_PATH") or str(
         Path(__file__).resolve().parents[1]
         / "datasets/ultrafeedback_binarized/data/train_prefs-00000-of-00001.parquet")

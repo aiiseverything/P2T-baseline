@@ -82,35 +82,104 @@ def fetch(url: str, destination: Path, *, attempts: int = 6) -> None:
             time.sleep(2 ** attempt)
 
 
-def repo_files(repo: str) -> list[str]:
-    with urllib.request.urlopen(f"{HF_API}/models/{repo}", timeout=60) as response:
-        payload = json.load(response)
-    return [item["rfilename"] for item in payload.get("siblings", [])]
+def repo_files(repo: str, *, attempts: int = 6) -> dict[str, int]:
+    """Map every repository file to its byte size, with retry.
+
+    Uses ``?blobs=true`` so the declared size is available: a download that was
+    interrupted leaves a short file that looks present, and size is the only
+    cheap way to tell a complete shard from a truncated one.  The metadata call
+    has no resumable body, so it needs its own retry.
+    """
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(f"{HF_API}/models/{repo}?blobs=true", timeout=60) as response:
+                payload = json.load(response)
+            return {item["rfilename"]: int(item.get("size") or 0)
+                    for item in payload.get("siblings", [])}
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            if attempt == attempts - 1:
+                raise
+            print(f"  metadata retry {attempt + 1}/{attempts} after "
+                  f"{type(error).__name__}: {error}", file=sys.stderr)
+            time.sleep(2 ** attempt)
+    return {}
+
+
+def model_problems(repo: str, target: Path) -> list[tuple[str, int, int]]:
+    """Files whose on-disk size disagrees with the repository's declared size."""
+    problems = []
+    for name, expected in repo_files(repo).items():
+        if name.endswith(SKIP_SUFFIXES):
+            continue
+        path = target / name
+        actual = path.stat().st_size if path.is_file() else -1
+        if expected and actual != expected:
+            problems.append((name, actual, expected))
+    return problems
 
 
 def download_model(repo: str, target: Path) -> None:
-    files = [name for name in repo_files(repo) if not name.endswith(SKIP_SUFFIXES)]
-    print(f"{repo}: {len(files)} files -> {target}")
-    missing = [name for name in files
-               if not (target / name).is_file()
-               or (target / name).stat().st_size == 0]
-    if not missing:
+    sizes = {name: size for name, size in repo_files(repo).items()
+             if not name.endswith(SKIP_SUFFIXES)}
+    print(f"{repo}: {len(sizes)} files -> {target}")
+    # Size, not existence: an interrupted transfer leaves a short file behind,
+    # and `fetch` resumes from whatever is on disk rather than restarting.
+    incomplete = [name for name, expected in sizes.items()
+                  if not (target / name).is_file()
+                  or (target / name).stat().st_size != expected]
+    if not incomplete:
         print("  already complete")
         return
+    total = sum(sizes[name] for name in incomplete)
+    print(f"  {len(incomplete)} file(s) to fetch or repair, {total / 2**30:.1f} GiB")
     with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(lambda name: _one(repo, target, name), missing))
+        list(pool.map(lambda name: _one(repo, target, name), incomplete))
+    remaining = [(name, (target / name).stat().st_size if (target / name).is_file() else -1,
+                  sizes[name]) for name in sizes
+                 if not (target / name).is_file() or (target / name).stat().st_size != sizes[name]]
+    if remaining:
+        raise RuntimeError(f"{len(remaining)} file(s) still incomplete after download: "
+                           f"{[name for name, _, _ in remaining]}")
 
 
 def _one(repo: str, target: Path, name: str) -> None:
     destination = target / name
     before = destination.stat().st_size if destination.exists() else 0
-    fetch(f"{HF}/{repo}/resolve/main/{name}", destination)
+    if not hub_download(repo, name, destination, repo_type="model"):
+        fetch(f"{HF}/{repo}/resolve/main/{name}", destination)
     after = destination.stat().st_size
     print(f"  {name}: {before / 2**20:.0f} -> {after / 2**20:.0f} MiB")
 
 
-def download_dataset_file(repo: str, remote: str, target: Path) -> None:
+def hub_download(repo: str, remote: str, target: Path, *, repo_type: str) -> bool:
+    """Fetch through ``huggingface_hub`` when it is importable.
+
+    Hand-rolled urllib gets HTTP 401 on the Hub's signed CDN redirects, and it
+    cannot verify an etag.  The library handles auth, redirects, chunked resume
+    and integrity, so it is used whenever the pinned environment is present;
+    the stdlib path stays for bootstrapping before that environment exists.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = hf_hub_download(repo_id=repo, filename=remote, repo_type=repo_type,
+                             local_dir=str(target.parent.parent))
+    staged_path = Path(staged)
+    if staged_path.resolve() != target.resolve() and staged_path.is_file():
+        shutil.copyfile(staged_path, target)
+    return True
+
+
+def download_dataset_file(repo: str, remote: str, target: Path,
+                          *, dataset: bool = True) -> None:
     print(f"{repo}/{remote} -> {target}")
+    if target.is_file() and target.stat().st_size:
+        return
+    if hub_download(repo, remote, target,
+                    repo_type="dataset" if dataset else "model"):
+        return
     fetch(f"{HF}/{repo}/resolve/main/{remote}", target)
 
 
@@ -152,6 +221,16 @@ def alpaca_reference(source: Path, target: Path) -> None:
 def gsm8k_jsonl(target: Path) -> None:
     if target.exists() and target.stat().st_size:
         return
+    local = target.parent / "test.parquet"
+    if hub_download("openai/gsm8k", "main/test-00000-of-00001.parquet", local,
+                    repo_type="dataset"):
+        import pyarrow.parquet as pq
+        table = pq.read_table(local, columns=["question"])
+        with target.open("w") as handle:
+            for question in table.column("question").to_pylist():
+                handle.write(json.dumps({"question": question}, ensure_ascii=False) + "\n")
+        print(f"  wrote {len(table)} gsm8k rows -> {target}")
+        return
     build_jsonl_from_rows("openai/gsm8k", "main", "test", "question", target)
 
 
@@ -170,15 +249,23 @@ def check() -> int:
         state = "ok" if path.is_file() and path.stat().st_size else "MISSING"
         size = f"{path.stat().st_size / 2**20:.1f} MiB" if path.is_file() else "-"
         print(f"{state:8} {size:>12}  {path.relative_to(ROOT)}")
-    for name in ("Qwen3-14B-Base", "Skywork-Reward-V2-Qwen3-8B"):
-        directory = ROOT / "models" / name
-        shards = sorted(directory.glob("*.safetensors"))
-        total = sum(shard.stat().st_size for shard in shards) / 2**30
-        print(f"         {total:>9.2f} GiB  {name} ({len(shards)} shards)")
+    # Declared size, not presence: a truncated shard is a file that exists, and
+    # loading it fails only once the run has already started.
+    for name, repo in ((relative.split("/")[1], repo) for relative, repo in MODELS.items()):
+        problems = model_problems(repo, ROOT / "models" / name)
+        if problems:
+            missing.append(ROOT / "models" / name)
+            for filename, actual, expected in problems:
+                print(f"INCOMPLETE  {actual / 2**20:>8.1f}/{expected / 2**20:.1f} MiB  "
+                      f"models/{name}/{filename}", file=sys.stderr)
+        else:
+            total = sum((ROOT / "models" / name / f).stat().st_size
+                        for f in repo_files(repo) if f.endswith(".safetensors"))
+            print(f"         {total / 2**30:>9.2f} GiB  {name} (verified against the Hub)")
     if missing:
-        print(f"\n{len(missing)} required asset(s) missing", file=sys.stderr)
+        print(f"\n{len(missing)} required asset(s) missing or incomplete", file=sys.stderr)
         return 1
-    print("\nall assets present")
+    print("\nall assets present and complete")
     return 0
 
 

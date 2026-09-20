@@ -34,9 +34,29 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# Actor on 0, reward model on 1, vLLM on 2 and 3. The server subprocess
-# re-exports its own CUDA_VISIBLE_DEVICES from the physical ids.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+# Actor on 0, reward model on 1, vLLM on 2 and 3.  Set explicitly rather than
+# inherited: the trainer's actor/reward indices are relative to this list while
+# vllm_gpus names physical cards, so an inherited value would silently run the
+# actor on one set of GPUs and generation on another.
+export CUDA_VISIBLE_DEVICES="${P2T_GPUS:-0,1,2,3}"
+
+# Refuse to start onto occupied cards: an OOM 90 seconds into model loading is
+# a worse failure than not starting.
+python - <<'CHECK'
+import os, subprocess, sys
+visible = [g.strip() for g in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if g.strip()]
+out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used",
+                      "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
+used = {}
+for line in out.strip().splitlines():
+    index, memory = (part.strip() for part in line.split(","))
+    used[index] = int(memory)
+busy = [(g, used.get(g, 0)) for g in visible if used.get(g, 0) > 2048]
+if busy:
+    print(f"refusing to start: GPUs {busy} already hold more than 2 GiB", file=sys.stderr)
+    raise SystemExit(1)
+print("gpu preflight ok:", {g: used.get(g, 0) for g in visible})
+CHECK
 
 echo "=== run ${RUN} started $(date -Is) ===" >> "$LOG"
 setsid nohup python "${ROOT}/scripts/run_train.py" --config "$CONFIG" "$@" \
