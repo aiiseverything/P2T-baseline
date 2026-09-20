@@ -63,6 +63,25 @@ def sampling_logits(logits: Tensor, *, min_response_tokens: int = 0,
     return z
 
 
+_warned_full_logits = False
+
+
+def _warn_full_logits_once():
+    """``logits_to_keep`` is what keeps the forward inside a 48 GB card.
+
+    If the checkpoint's forward rejects it we fall back to materializing the
+    whole ``[B, T, V]`` tensor, which is survivable only because the physical
+    microbatch is one.  Say so loudly rather than let the memory claim in the
+    README quietly become false.
+    """
+    global _warned_full_logits
+    if not _warned_full_logits:
+        _warned_full_logits = True
+        print("[policy] WARNING: the actor rejected logits_to_keep; falling back to a "
+              "full [B,T,V] logits tensor. Memory use is much higher than the "
+              "microbatch-1 budget assumes.", flush=True)
+
+
 def response_logits(actor: nn.Module, input_ids: Tensor, attention_mask: Tensor,
                     response_positions: Tensor, response_mask: Tensor,
                     output_mask: Tensor | None = None) -> Tensor:
@@ -91,6 +110,7 @@ def response_logits(actor: nn.Module, input_ids: Tensor, attention_mask: Tensor,
         try:
             logits = actor(**kwargs, logits_to_keep=keep).logits
         except TypeError:
+            _warn_full_logits_once()
             logits = gather_response(actor(**kwargs).logits, predecessors, valid)
     else:
         logits = gather_response(actor(**kwargs).logits, predecessors, valid)

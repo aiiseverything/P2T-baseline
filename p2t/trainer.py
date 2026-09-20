@@ -100,6 +100,7 @@ class TrainerConfig:
     degenerate_newline_run: int = 32
     degenerate_penalty: float = 1.0
     # --- bookkeeping ----------------------------------------------------------
+    gate_initial_hf_clip: bool = True  # abort if the first re-forward disagrees
     checkpoint_interval: int = 0  # 0 -> only the final adapter
     keep_adapters: int = 2  # most recent per-step vLLM adapters retained on disk
     token_chunk_size: int = 128
@@ -471,10 +472,14 @@ class P2TTrainer:
             raise RuntimeError("Call prepare_sigma0(training_prompts) before training")
 
         clock = phase("generation_sec", started)
+        # `self.rollout` returns (rollout, generation_summary); the selector wants
+        # the tuple alone.
         rollout, prompts, selection = select_training_rollout(
-            self.rollout, prompts, group_size=self.cfg.group_size,
+            lambda batch: self.rollout(batch)[0], prompts, group_size=self.cfg.group_size,
             pad_token_id=self.actor_tokenizer.pad_token_id,
-            flag_degenerate=self._degeneracy, device=self.actor_device)
+            flag_degenerate=self._degeneracy, device=self.actor_device,
+            stop_token_ids=self.stop_token_ids,
+            max_response_tokens=self.cfg.max_response_tokens)
         self._write_rollout_artifacts(prompts, rollout)
         if rollout is None:
             # No response reaches the loss, including KL, Adam moments or decay.
@@ -489,7 +494,12 @@ class P2TTrainer:
             self.pusher.maybe_push(self.rollout_index, metrics)
             return metrics
         input_ids, full_mask, positions, responses, rmask, _, finish_reasons, rollout_logprobs = rollout
-        self._validate_rollout(rollout, len(prompts))
+        # Every mask consumer below writes ``~mask``; a long tensor there is a
+        # bitwise complement, not a boolean negation, and the failure is silent
+        # until an unrelated masked_fill raises.  Normalise once.
+        rmask = rmask.bool()
+        self._validate_rollout((input_ids, full_mask, positions, responses, rmask, _,
+                                finish_reasons, rollout_logprobs), len(prompts))
 
         clock = phase("reward_model_gradient_sec", clock)
         raw_rewards, attribution, _, alignment = self.score_and_attribute(prompts, responses, rmask)
@@ -558,9 +568,9 @@ class P2TTrainer:
         importance = (old_logp.detach() - rollout_logprobs).exp().masked_fill(~rmask, 1)
         if not (torch.isfinite(importance) & (importance > 0)).all():
             raise ValueError("Rollout importance weights must be positive and finite")
-        # The sampler and the trainer forward the same weights, so this should be
-        # numerically zero.  A non-zero value here is exactly what the importance
-        # weights would otherwise absorb silently.
+        # The sampler and the trainer forward the same weights under the same
+        # FP32 head, so this delta should be numerically zero.  Whatever it is,
+        # the importance weights would otherwise absorb it silently.
         logp_delta = (old_logp - rollout_logprobs)[rmask]
         probability_metrics = {
             "rollout_logp_abs_error_mean": float(logp_delta.abs().mean()),
@@ -624,9 +634,10 @@ class P2TTrainer:
 
         mask = rmask.to(self.reward_device)
         with torch.no_grad():
+            # Same estimator and weighting as the project's reference-KL metric.
             delta = (ref_logp - old_logp).masked_fill(~rmask, 0)
-            kl_to_init = float((torch.expm1(delta) - delta).masked_fill(~rmask, 0).sum()
-                               / rmask.sum())
+            kl_values = (torch.expm1(delta) - delta) * importance.detach()
+            kl_to_init = float(kl_values.masked_fill(~rmask, 0).sum() / rmask.sum())
         metrics = {
             "rollout": self.rollout_index,
             "loss": loss_value,
@@ -665,13 +676,21 @@ class P2TTrainer:
         metrics.update(selection)
         metrics.update(probability_metrics)
         if initial_delta is not None:
+            clip_fraction = float(((initial_delta < math.log1p(-self.cfg.clip_eps))
+                                   | (initial_delta > math.log1p(self.cfg.clip_eps))).float().mean())
             metrics["initial_hf_logp_max_abs_error"] = float(initial_delta.abs().max())
-            metrics["initial_hf_ratio_clip_fraction"] = float(
-                ((initial_delta < math.log1p(-self.cfg.clip_eps))
-                 | (initial_delta > math.log1p(self.cfg.clip_eps))).float().mean())
+            metrics["initial_hf_ratio_clip_fraction"] = clip_fraction
+            # The same gate the project's launcher applies: at theta = theta_old
+            # the re-forward must land inside the clipping band, otherwise the
+            # sampler and the trainer are running different probability protocols
+            # and the importance weights would hide it for the whole run.
+            if self.cfg.gate_initial_hf_clip and self.rollout_index == 1 and clip_fraction:
+                raise ValueError(
+                    f"First re-forward disagrees with the sampler "
+                    f"(max |delta| {metrics['initial_hf_logp_max_abs_error']:.3e}, "
+                    f"clip fraction {clip_fraction:.3f}); the sampler and trainer "
+                    f"probability protocols differ")
         metrics.update({f"phase_{key}": value for key, value in timings.items()})
-        metrics.update({k: v for k, v in generation_summary.items()
-                        if isinstance(v, (int, float, str, bool))})
         if self.actor_device.type == "cuda":
             metrics["actor_peak_gb"] = torch.cuda.max_memory_allocated(self.actor_device) / 2 ** 30
         if self.reward_device.type == "cuda":
@@ -707,13 +726,21 @@ class P2TTrainer:
         advantage_scale = advantages.abs().mean().clamp_min(torch.finfo(torch.float32).tiny)
         # Exactly alpha * omega * R * (share - 1/T): the per-response constant
         # alpha * R * (1 + omega/T) is subtracted off, leaving only the part that
-        # can move credit between tokens.
+        # can move credit between tokens.  `number` is [B]; it needs a column to
+        # broadcast against [B, T] rather than forming a [B, B] outer product.
         constant = (self.cfg.alpha * raw_rewards.to(self.reward_device)[:, None]
-                    * (1 + self.cfg.omega / number)).expand_as(mask)
+                    * (1 + self.cfg.omega / number[:, None])).expand_as(mask)
         varying = valid_bonus - constant[mask]
+        # A real flip is A^hat + bonus changing sign, not merely the bonus
+        # opposing A^hat: a bonus that opposes but is smaller leaves the
+        # response's direction intact.
         nonzero = valid_advantage != 0
-        sign_flip = (torch.sign(valid_bonus[nonzero]) != torch.sign(valid_advantage[nonzero]))
-        zero_mass = (share[valid_attr == 0].sum() / share.sum().clamp_min(1e-12))
+        sign_flip = (torch.sign((valid_advantage + valid_bonus)[nonzero])
+                     != torch.sign(valid_advantage[nonzero]))
+        # Share mass landing on tokens whose attribution is exactly zero, in the
+        # same row-major gather order as valid_attr.
+        valid_share = share[mask]
+        zero_mass = valid_share[valid_attr == 0].sum() / valid_share.sum().clamp_min(1e-12)
         quantiles = torch.quantile(valid_attr.float(),
                                    torch.tensor([.01, .5, .99], device=valid_attr.device))
         return {

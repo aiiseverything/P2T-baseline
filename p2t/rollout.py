@@ -61,6 +61,19 @@ def _usable_rows(rollout, flag_degenerate):
     return finished & ~(empty | repeated)
 
 
+def _check_sources(rollout, stop_token_ids, max_response_tokens) -> None:
+    """Validate a rollout before any of it can be dropped.
+
+    ``_pack`` re-densifies the mask, so a source with an interior hole would be
+    silently repaired rather than rejected -- check the sources, not just the
+    merged result.
+    """
+    if stop_token_ids is None:
+        return
+    validate_response_termination(rollout[3], rollout[4], rollout[6],
+                                  stop_token_ids, max_response_tokens)
+
+
 def _usable_groups(usable, prompt_count: int, group_size: int) -> list[bool]:
     groups = torch.arange(prompt_count * group_size, device=usable.device) // group_size
     return [bool(usable[groups == index].any()) for index in range(prompt_count)]
@@ -76,8 +89,14 @@ def _needed_width(rollout, indices) -> int:
     return int(rollout[4][rows].sum(-1).max().item())
 
 
-def _pack(rollout, indices, width: int, pad_token_id: int, device):
-    """Rebuild an 8-field rollout from selected rows, all padded to ``width``."""
+def _pack(rollout, indices, width: int, prompt_width: int, pad_token_id: int, device):
+    """Rebuild an 8-field rollout from selected rows.
+
+    Response columns are trimmed or zero-padded to ``width`` and the prompt block
+    is **left**-padded to the batch-common ``prompt_width``: the actor tokenizer
+    pads on the left, and a resampled batch holds fewer prompts so its own
+    prompt block is narrower.  Without this the pieces cannot be concatenated.
+    """
     input_ids, full_mask, positions, responses, response_mask, rendered, reasons, logprobs = rollout
     rows = torch.as_tensor(indices, device=device)
     selected = responses[rows]
@@ -89,9 +108,18 @@ def _pack(rollout, indices, width: int, pad_token_id: int, device):
     packed_responses[:, :width] = selected[:, :width]
     packed_logprobs = torch.zeros((len(indices), width), dtype=torch.float32, device=device)
     packed_logprobs[:, :width] = logprobs[rows][:, :width]
-    prompt_width = input_ids.shape[1] - responses.shape[1]
-    packed_input = torch.cat([input_ids[rows][:, :prompt_width], packed_responses], dim=1)
-    packed_full = torch.cat([full_mask[rows][:, :prompt_width], packed_mask.to(full_mask.dtype)], dim=1)
+
+    source_width = input_ids.shape[1] - responses.shape[1]
+    if source_width > prompt_width:
+        raise ValueError("Common prompt width is narrower than a source rollout's")
+    deficit = prompt_width - source_width
+    prompt_block = input_ids[rows][:, :source_width]
+    prompt_mask = full_mask[rows][:, :source_width]
+    if deficit:
+        prompt_block = torch.nn.functional.pad(prompt_block, (deficit, 0), value=pad_token_id)
+        prompt_mask = torch.nn.functional.pad(prompt_mask, (deficit, 0), value=0)
+    packed_input = torch.cat([prompt_block, packed_responses], dim=1)
+    packed_full = torch.cat([prompt_mask, packed_mask.to(full_mask.dtype)], dim=1)
     packed_positions = torch.arange(prompt_width, packed_input.shape[1],
                                     device=device).expand(len(indices), -1)
     return (packed_input, packed_full, packed_positions, packed_responses, packed_mask,
@@ -100,14 +128,19 @@ def _pack(rollout, indices, width: int, pad_token_id: int, device):
 
 @torch.no_grad()
 def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_id: int,
-                            flag_degenerate, device):
+                            flag_degenerate, device, stop_token_ids=None,
+                            max_response_tokens: int | None = None):
     """Sample prompt groups, resample wholly-bad groups once, drop what remains.
 
-    Returns ``(rollout_or_None, prompts, stats)``.  A ``None`` rollout means no
-    group survived, in which case the caller must skip the update entirely --
-    including the KL term, the Adam moments and weight decay.
+    ``rollout_fn(prompts)`` must return the bare 8-field rollout tuple, not a
+    ``(rollout, summary)`` pair.  Returns ``(rollout_or_None, prompts, stats)``;
+    a ``None`` rollout means no group survived, in which case the caller must
+    skip the update entirely -- including the KL term, the Adam moments and
+    weight decay.
     """
     rollout = rollout_fn(prompts)
+    if max_response_tokens is not None:
+        _check_sources(rollout, stop_token_ids, max_response_tokens)
     usable = _usable_rows(rollout, flag_degenerate)
     good = _usable_groups(usable, len(prompts), group_size)
     stats = {"input_prompt_groups": len(prompts),
@@ -121,6 +154,8 @@ def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_i
     if stats["resampled_groups"]:
         retry_prompts = [prompt for prompt, ok in zip(prompts, good) if not ok]
         retry = rollout_fn(retry_prompts)
+        if max_response_tokens is not None:
+            _check_sources(retry, stop_token_ids, max_response_tokens)
         retry_usable = _usable_rows(retry, flag_degenerate)
         retry_good = _usable_groups(retry_usable, len(retry_prompts), group_size)
         stats["skipped_groups"] = sum(1 for ok in retry_good if not ok)
@@ -134,7 +169,10 @@ def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_i
         return None, [], stats
 
     width = max(_needed_width(source, indices) for source, indices, _ in pieces)
-    packed = [_pack(source, indices, width, pad_token_id, device)
+    # A retry batch holds fewer prompts, so its own chat padding is narrower;
+    # every piece is left-padded to the widest prompt block before concatenation.
+    prompt_width = max(source[0].shape[1] - source[3].shape[1] for source, _, _ in pieces)
+    packed = [_pack(source, indices, width, prompt_width, pad_token_id, device)
               for source, indices, _ in pieces]
     merged = tuple(
         sum((piece[position] for piece in packed), []) if position in (5, 6)

@@ -78,12 +78,20 @@ diagnostics that reveal it:
   the part of the token bonus that actually varies across tokens; the plain
   `p2t_bonus_over_advantage` includes Eq. (3)'s per-response constant
   `α·R·(1 + ω/T)` and so barely moves between the flat and one-hot regimes.
-* `p2t_sign_flip_fraction` — share of tokens whose `Ã` has the opposite sign to
-  their response's `Â`. Large values mean the constant term, not the outcome,
-  is deciding the update direction.
+* `p2t_sign_flip_fraction` — share of tokens where `sign(Â + bonus) ≠ sign(Â)`,
+  i.e. the bonus is large enough and opposed enough to reverse the response's
+  direction. It is token-weighted, so a short reversed response is diluted by
+  long ones; read it as a whole-run proportion, not a per-response verdict.
 * `p2t_zero_attribution_share_mass` — share of the softmax mass landing on tokens
-  with `I = 0` (unmapped tokens and any mapped token with a zero gradient). High
-  values mean the bonus is being spent where the reward model gave no signal.
+  with `I = 0`. That mixes two populations: unmapped tokens (specials, BPE
+  rewrites, and the pooling position itself) and mapped tokens whose gradient
+  happens to be zero. High values mean the bonus is being spent where the reward
+  model gave no signal. It reads 1.0 by construction when the whole attribution
+  vector is zero, which is the fully inert case.
+
+A reading caveat on `p2t_varying_bonus_over_advantage`: for a one-hot share it
+equals `2αω|R|(1 − 1/T)/T`, so it shrinks with response length in *both* regimes.
+Only the flat-versus-peaked contrast carries information, not the absolute value.
 
 Because the paper's α = 0.1 presumes an O(1) reward and Skywork scores are an
 order of magnitude larger, expect Eq. (3)'s constant term to dominate. The

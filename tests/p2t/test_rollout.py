@@ -144,6 +144,80 @@ def test_pieces_of_different_widths_merge_into_one_batch():
     torch.testing.assert_close(result[3][:GROUP, 2:], torch.zeros(GROUP, 3, dtype=torch.long))
 
 
+def test_retry_batch_with_a_narrower_prompt_block_still_merges():
+    """A retry batch holds fewer prompts, so its chat padding is narrower.
+
+    The pieces must be re-padded to a common prompt width before concatenation,
+    otherwise the correct-looking single-pass path hides a crash that only the
+    resample path reaches.
+    """
+    calls = []
+    degenerate_first = [True]
+
+    def rollout_fn(prompts):
+        calls.append(len(prompts))
+        # the retry is built from a single prompt, so its prompt block is narrower
+        base = _rollout(len(prompts), 4, "stop")
+        if len(calls) > 1:
+            input_ids, full_mask, positions, responses, mask, rendered, reasons, logprobs = base
+            narrower = input_ids[:, 1:]
+            base = (narrower, full_mask[:, 1:], positions - 1, responses, mask,
+                    rendered, reasons, logprobs)
+        return base
+
+    def flag_degenerate(responses, mask):
+        rows = responses.shape[0]
+        empty = torch.zeros(rows, dtype=torch.bool)
+        if degenerate_first[0]:
+            empty[:GROUP] = True
+            degenerate_first[0] = False
+        return empty, torch.zeros(rows, dtype=torch.bool)
+
+    result, prompts, _ = select_training_rollout(
+        rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
+        flag_degenerate=flag_degenerate, device=torch.device("cpu"))
+    assert calls == [2, 1]
+    assert result is not None
+    assert result[0].shape[0] == 2 * GROUP
+    assert result[1].shape == result[0].shape
+    # positions index the response columns only
+    assert result[2].shape == result[3].shape
+    # and must stay anchored at the common prompt width after the re-pad
+    prompt_width = result[0].shape[1] - result[3].shape[1]
+    torch.testing.assert_close(result[2][:, 0], torch.full((2 * GROUP,), prompt_width,
+                                                           dtype=result[2].dtype))
+    # the narrow piece's prompt block was left-padded, so its mask starts at zero
+    assert (result[1][:, 0] == 0).any(), "left padding must be unattended"
+
+
+def test_source_termination_is_validated_before_anything_is_dropped():
+    """Packing re-densifies the mask, so a bad source must be rejected first."""
+    rollout = _rollout(1, 4, "length")  # truncated rows must fill the cap
+
+    def rollout_fn(prompts):
+        input_ids, full_mask, positions, responses, mask, rendered, reasons, logprobs = rollout
+        return (input_ids, full_mask, positions, responses, mask, rendered,
+                ["stop"] * responses.shape[0], logprobs)
+
+    with pytest.raises(ValueError, match="termination"):
+        select_training_rollout(rollout_fn, ["a"], group_size=GROUP, pad_token_id=PAD,
+                                flag_degenerate=_flags(), device=torch.device("cpu"),
+                                stop_token_ids=(2,), max_response_tokens=5)
+
+
+def test_rollout_fn_must_return_the_bare_tuple():
+    """The trainer's `rollout` returns a pair; the selector takes the tuple.
+
+    Passing the pair through would index a summary dict as if it were a rollout,
+    which is exactly the wiring mistake this asserts against.
+    """
+    rollout = _rollout(1, 4, "stop")
+    with pytest.raises((IndexError, TypeError, KeyError)):
+        select_training_rollout(lambda ps: (rollout, {"summary": 1}), ["a"],
+                                group_size=GROUP, pad_token_id=PAD,
+                                flag_degenerate=_flags(), device=torch.device("cpu"))
+
+
 def test_termination_validation_accepts_consistent_metadata():
     responses = torch.tensor([[1, 2, 0], [3, 4, 5]])
     mask = torch.tensor([[1, 1, 0], [1, 1, 1]])

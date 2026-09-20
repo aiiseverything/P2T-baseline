@@ -7,8 +7,9 @@ length, policy entropy, the ratio of the token bonus to the sequence advantage,
 and the attribution softmax's effective sample size.
 
 The last two are diagnostics, not objectives: a flat softmax drives the ESS
-toward 1/T and reduces Eq. (3) to a per-response constant, which is the failure
-mode that makes a P2T arm silently behave like GRPO.
+toward 1 -- the inert end, same reading as the VPO arms' credit ESS -- and
+reduces Eq. (3) to a per-response constant, which is the failure mode that makes
+a P2T arm silently behave like GRPO.
 """
 from __future__ import annotations
 
