@@ -53,7 +53,7 @@ class Credit:
     """
 
     advantage: Tensor   # [B, T] A~, cached token advantages
-    direction: Tensor   # [B, T] A~ - A^hat = alpha * omega * R * share
+    direction: Tensor   # [B, T] A~ - A^hat = alpha * R * (1 + omega * share)
     weight: Tensor      # [B, T] share scaled so the valid-token mean is one
     tau_used: Tensor | None = None  # unused by P2T; present for interface parity
 
@@ -169,8 +169,10 @@ def p2t_credit(rewards: Tensor, attribution: Tensor, advantages: Tensor,
     # utility spread gauge measures; keep that identity exactly.
     direction = (advantage - advantages.float()[:, None]).masked_fill(~mask, 0.0)
     # Same normalisation convention as vpo_rm.core.allocate: the per-response
-    # valid-token mean of the diagnostic weight is one.  Note the meaning of the
-    # resulting ESS is *inverted* relative to VPO (1 ~ one-hot attribution here,
-    # 1/T ~ flat), which the metrics block documents.
+    # valid-token mean of the diagnostic weight is one.  ESS/T is therefore
+    # 1/(T * sum p^2) and reads the same way as the VPO arms' credit_ess_ratio:
+    # near one means the weights are flat -- which for P2T means the attribution
+    # softmax carried no token-level information at all -- and near 1/T means a
+    # single token absorbed the whole share.
     weight = (share * mask.sum(-1, keepdim=True).float()).masked_fill(~mask, 0.0)
     return Credit(advantage, direction, weight, None)

@@ -157,7 +157,10 @@ def rollout_logp_microbatch(actor: nn.Module, input_ids, attention_mask, positio
     if switched:
         actor.set_adapter(adapter)
     from contextlib import nullcontext
-    context = actor.disable_adapter() if adapter == "base" else nullcontext()
+    # "base" disables the LoRA adapter.  With no adapter fitted the model already
+    # is the initialisation, so the reference is the identity path.
+    context = (actor.disable_adapter() if adapter == "base" and hasattr(actor, "disable_adapter")
+               else nullcontext())
     try:
         with context:
             for start in range(0, rows, micro):

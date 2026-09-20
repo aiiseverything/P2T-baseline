@@ -12,10 +12,14 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 import unicodedata
 
+# Anchored to the checkout, not to the working directory, so an ad-hoc
+# invocation from elsewhere still finds the benchmark files the parent project
+# requires for prompt isolation.
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BENCHMARK_PATHS = {
-    "alpacaeval": Path("datasets/alpacaeval/eval_gpt4turbo_reference.jsonl"),
-    "ifeval": Path("datasets/ifeval/ifeval_input_data.jsonl"),
-    "gsm8k": Path("datasets/gsm8k/test.jsonl"),
+    "alpacaeval": ROOT / "datasets/alpacaeval/eval_gpt4turbo_reference.jsonl",
+    "ifeval": ROOT / "datasets/ifeval/ifeval_input_data.jsonl",
+    "gsm8k": ROOT / "datasets/gsm8k/test.jsonl",
 }
 _PROMPT_FIELDS = ("instruction", "prompt", "question")
 
@@ -132,6 +136,7 @@ def split_prompts(prompts: Iterable[str], validation_size: int = 2000):
 def load_prompt_dataset(name: str = "HuggingFaceH4/ultrafeedback_binarized",
                         split: str = "train_prefs", field: str = "prompt",
                         dataset_path: str | None = None,
+                        validation_size: int = 2000,
                         benchmark_paths=None):
     """Load prompts from a local parquet (preferred) or the Hub, then split."""
     if dataset_path:
@@ -150,6 +155,6 @@ def load_prompt_dataset(name: str = "HuggingFaceH4/ultrafeedback_binarized",
         dataset = load_dataset(name, split=split)
         values = (row[field] for row in dataset)
     values, exclusion = exclude_benchmark_prompts(values, benchmark_paths=benchmark_paths)
-    train, valid, hashes = split_prompts(values)
+    train, valid, hashes = split_prompts(values, validation_size=validation_size)
     hashes["benchmark_exclusion"] = exclusion
     return train, valid, hashes

@@ -22,6 +22,7 @@ import math
 import os
 from pathlib import Path
 import random
+import shutil
 import time
 
 import torch
@@ -32,14 +33,14 @@ from .data import load_prompt_dataset, normalize_prompt, split_prompts
 from .length_reward import (calibrate_reward_scale, guard_degenerate_rewards,
                             response_degeneracy, soft_length_penalties)
 from .loss import grpo_policy_loss, kl_from_logp
-from .mapping import REWARD_INPUT_PROTOCOL
+from .mapping import REWARD_INPUT_PROTOCOL, canonical_reward_input
 from .policy import (encode_prompts, render_chat_prompt, response_logits,
                      rollout_logp_microbatch, selected_logp_from_logits,
                      sampling_logits, stop_token_ids_for)
 from .reward import P2T_ALPHA_SHORT_COT, P2T_OMEGA, group_advantages, p2t_credit
+from .rollout import select_training_rollout, validate_response_termination
 from .rm import LastTokenReward, build_rm_batch, score_responses
-from .tokens import (check_tokenizer_identity, get_special_token_ids,
-                     load_actor_tokenizer, shared_output_mask)
+from .tokens import check_tokenizer_identity, load_actor_tokenizer, shared_output_mask
 from .vllm import GenerationServer, pack_rollout, unpadded_prompt_token_ids
 
 
@@ -67,6 +68,7 @@ class TrainerConfig:
     microbatch_responses: int = 1
     max_prompt_tokens: int = 2048
     max_response_tokens: int = 2048
+    policy_head_dtype: str = "float32"
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
@@ -99,7 +101,7 @@ class TrainerConfig:
     degenerate_penalty: float = 1.0
     # --- bookkeeping ----------------------------------------------------------
     checkpoint_interval: int = 0  # 0 -> only the final adapter
-    keep_adapters_every: int = 1
+    keep_adapters: int = 2  # most recent per-step vLLM adapters retained on disk
     token_chunk_size: int = 128
     validation_size: int = 2000
     fit_prompt_filter: bool = True
@@ -161,6 +163,8 @@ class TrainerConfig:
             raise ValueError("require 0 <= min_response_tokens <= max_response_tokens")
         if c.push_every < 0:
             raise ValueError("push_every must be nonnegative")
+        if c.policy_head_dtype not in {"native", "float32"}:
+            raise ValueError("policy_head_dtype must be native or float32")
         if len(c.vllm_gpus) != c.vllm_tensor_parallel_size:
             raise ValueError("vllm_gpus must list exactly tensor_parallel_size devices")
         return c
@@ -196,9 +200,6 @@ class P2TTrainer:
         self.output_mask = shared_output_mask(
             self.actor_tokenizer, self.actor.get_output_embeddings().weight.shape[0],
             self.actor_device)
-        self.vocab_size = int(self.actor.get_output_embeddings().weight.shape[0])
-        self.special_token_ids = torch.tensor(get_special_token_ids(self.actor_tokenizer),
-                                              device=self.actor_device)
         self.optimizer = torch.optim.AdamW(
             (p for p in self.actor.parameters() if p.requires_grad),
             lr=self.cfg.learning_rate, weight_decay=self.cfg.weight_decay)
@@ -206,11 +207,11 @@ class P2TTrainer:
         self.total_tokens = 0
         self.adapter_id = 0
         self.sigma0 = self.cfg.sigma0
+        self.filtered_prompt_count = 0
         self.started = time.monotonic()
         self.pusher = AutoPusher(enabled=bool(self.cfg.push_every), every=self.cfg.push_every,
                                  remote=self.cfg.push_remote, branch=self.cfg.push_branch,
                                  report_dir=self.report_dir, repo_root=Path(__file__).resolve().parents[1])
-        self._last_rollout_logprobs = None
 
     # ------------------------------------------------------------------ loading
     @classmethod
@@ -269,10 +270,47 @@ class P2TTrainer:
                 log_path=Path(c.output_dir) / "vllm_server.log")
         trainer = cls(actor, actor_tokenizer, reward, reward_tokenizer, c, generation)
         trainer.actor.to(trainer.actor_device)
+        if c.policy_head_dtype == "float32":
+            from .policy_precision import enable_fp32_output_head
+            enable_fp32_output_head(trainer.actor)
         trainer.reward.to(trainer.reward_device).eval()
         for parameter in trainer.reward.parameters():
             parameter.requires_grad_(False)
+        trainer._refuse_nonzero_dropout()
         return trainer
+
+    def _refuse_nonzero_dropout(self):
+        """Sampler and trainer probabilities must match, so no dropout anywhere."""
+        if any(isinstance(module, torch.nn.Dropout) and module.p > 0
+               for module in self.actor.modules()):
+            raise ValueError("Actor dropout must be zero to match generation and training probabilities")
+        for name in ("attention_dropout", "hidden_dropout", "hidden_dropout_prob",
+                     "attention_probs_dropout_prob"):
+            if float(getattr(getattr(self.actor, "config", None), name, 0.0) or 0.0) != 0:
+                raise ValueError("Actor dropout must be zero to match generation and training probabilities")
+
+    def filter_prompts(self, prompts):
+        """Apply the experiment's post-template prompt length policy.
+
+        Both chat templates are measured before training so a prompt cannot be
+        silently truncated for the actor while a different prefix is fed to the
+        reward model.  Mirrors ``VPOTrainer.filter_prompts``; the parent applies
+        it before training, and the surviving list is what every arm shares.
+        """
+        kept = []
+        for prompt in prompts:
+            actor_text = render_chat_prompt(self.actor_tokenizer, prompt, tokenize=False)
+            actor_ids = self.actor_tokenizer(actor_text, add_special_tokens=False)["input_ids"]
+            reward_ids = canonical_reward_input(self.reward_tokenizer, str(prompt), "")
+            if (len(actor_ids) <= self.cfg.max_prompt_tokens
+                    and len(reward_ids) <= self.cfg.max_prompt_tokens):
+                kept.append(prompt)
+        self.filtered_prompt_count = len(prompts) - len(kept)
+        if self.filtered_prompt_count:
+            self._log({"event": "prompt_filter", "input_prompts": len(prompts),
+                       "kept_prompts": len(kept), "dropped_prompts": self.filtered_prompt_count,
+                       "max_prompt_tokens": self.cfg.max_prompt_tokens})
+        return kept
 
     # ------------------------------------------------------------- generation
     def save_adapter(self, path: Path) -> Path:
@@ -288,7 +326,10 @@ class P2TTrainer:
         self.actor.eval()
         batch, rendered = encode_prompts(self.actor_tokenizer, prompts, self.actor_device,
                                          self.cfg.max_prompt_tokens)
-        adapter_path = self.adapter_root / "live"
+        # A distinct path per step, matching the parent project.  Reusing one
+        # path would let the server keep serving a cached adapter and quietly
+        # turn the rollout off-policy.
+        adapter_path = self.adapter_root / f"step-{self.rollout_index}"
         self.save_adapter(adapter_path)
         self.adapter_id += 1
         result = self.generation.request({
@@ -303,7 +344,15 @@ class P2TTrainer:
             result, batch, rendered, group_size=self.cfg.group_size,
             max_response_tokens=self.cfg.max_response_tokens,
             pad_token_id=self.actor_tokenizer.pad_token_id, adapter_id=self.adapter_id)
+        self._prune_adapters()
         return rollout, summary
+
+    def _prune_adapters(self):
+        """Keep only the newest adapters: each one is ~0.5 GiB on disk."""
+        paths = sorted(self.adapter_root.glob("step-*"),
+                       key=lambda path: int(path.name.split("-")[1]))
+        for stale in paths[:max(0, len(paths) - self.cfg.keep_adapters)]:
+            shutil.rmtree(stale, ignore_errors=True)
 
     # ------------------------------------------------------------- calibration
     @torch.no_grad()
@@ -340,6 +389,11 @@ class P2TTrainer:
         sigma0 = calibrate_reward_scale(torch.tensor(scores), torch.tensor(groups),
                                         torch.tensor(valid_rows, dtype=torch.bool))
         self.sigma0 = sigma0
+        if count < 128 and self.cfg.rollout_iterations > 20:
+            print("[sigma0] WARNING: this run calibrated its own length-reward scale on "
+                  f"{count} prompts, but the formal protocol uses 128 and every arm must "
+                  "share one sigma0. The length window here will differ from the GRPO and "
+                  "VPO-RM arms.", flush=True)
         record = {"mode": "p2t_soft_length", "sigma0": sigma0,
                   "calibration_prompt_count": count,
                   "formal_calibration": count >= 128,
@@ -417,7 +471,23 @@ class P2TTrainer:
             raise RuntimeError("Call prepare_sigma0(training_prompts) before training")
 
         clock = phase("generation_sec", started)
-        rollout, generation_summary = self.rollout(prompts)
+        rollout, prompts, selection = select_training_rollout(
+            self.rollout, prompts, group_size=self.cfg.group_size,
+            pad_token_id=self.actor_tokenizer.pad_token_id,
+            flag_degenerate=self._degeneracy, device=self.actor_device)
+        self._write_rollout_artifacts(prompts, rollout)
+        if rollout is None:
+            # No response reaches the loss, including KL, Adam moments or decay.
+            self.rollout_index += 1
+            metrics = {"rollout": self.rollout_index, "skipped_rollout": True,
+                       "optimizer_steps": 0, "response_tokens": 0, "reward_count": 0,
+                       "loss": 0.0, "elapsed_sec": time.monotonic() - started,
+                       "gpu_hours": (time.monotonic() - self.started)
+                       * (2 + self.cfg.vllm_tensor_parallel_size) / 3600,
+                       "phase_generation_sec": clock - started, **selection}
+            self._log(metrics)
+            self.pusher.maybe_push(self.rollout_index, metrics)
+            return metrics
         input_ids, full_mask, positions, responses, rmask, _, finish_reasons, rollout_logprobs = rollout
         self._validate_rollout(rollout, len(prompts))
 
@@ -448,8 +518,12 @@ class P2TTrainer:
                 if not bool(good.any()):
                     raise RuntimeError("An entirely degenerate group reached the update")
                 shaped[flagged] = shaped[good].min() - self.cfg.degenerate_penalty
-        shaped, n_degenerate = guard_degenerate_rewards(
-            shaped, lengths, group_ids, 1, self.cfg.degenerate_penalty)
+        # The flagged set is what was floored above; report that count rather than
+        # the guard's, which is a no-op once min_length is at its soft-mode floor.
+        n_degenerate = int(flags.sum())
+        shaped, _ = guard_degenerate_rewards(
+            shaped, lengths, group_ids, max(1, self.cfg.min_response_tokens),
+            self.cfg.degenerate_penalty)
         advantages, scales = group_advantages(
             shaped, group_ids,
             std_floor=self.cfg.advantage_std_floor_fraction * self.sigma0)
@@ -484,12 +558,29 @@ class P2TTrainer:
         importance = (old_logp.detach() - rollout_logprobs).exp().masked_fill(~rmask, 1)
         if not (torch.isfinite(importance) & (importance > 0)).all():
             raise ValueError("Rollout importance weights must be positive and finite")
+        # The sampler and the trainer forward the same weights, so this should be
+        # numerically zero.  A non-zero value here is exactly what the importance
+        # weights would otherwise absorb silently.
+        logp_delta = (old_logp - rollout_logprobs)[rmask]
+        probability_metrics = {
+            "rollout_logp_abs_error_mean": float(logp_delta.abs().mean()),
+            "rollout_logp_abs_error_max": float(logp_delta.abs().max()),
+            "rollout_is_mean": float(importance[rmask].mean()),
+            "rollout_is_max": float(importance[rmask].max()),
+            "rollout_is_ess_ratio": float(
+                importance[rmask].sum().square()
+                / (importance[rmask].numel() * importance[rmask].square().sum())),
+            "rollout_direct_ratio_clip_fraction": float(
+                ((importance < 1 - self.cfg.clip_eps)
+                 | (importance > 1 + self.cfg.clip_eps))[rmask].float().mean()),
+        }
 
         clock = phase("actor_update_sec", clock)
         self.actor.train()
         minibatch = self.cfg.optimizer_minibatch_responses
         micro = max(1, self.cfg.microbatch_responses)
         loss_value, optimizer_steps, grad_norm = 0.0, 0, 0.0
+        initial_delta = None
         for start in range(0, batch, minibatch):
             end = min(batch, start + minibatch)
             self.optimizer.zero_grad(set_to_none=True)
@@ -504,6 +595,10 @@ class P2TTrainer:
                     logits, responses[sl], rmask[sl],
                     policy_temperature=self.cfg.temperature,
                     token_chunk_size=self.cfg.token_chunk_size)
+                if initial_delta is None:
+                    # The first trainable forward must reproduce the cached old
+                    # policy log-probabilities at theta = theta_old.
+                    initial_delta = (new_logp.detach() - old_logp[sl])[rmask[sl]]
                 chunk = grpo_policy_loss(new_logp, old_logp[sl], credit.advantage[sl], rmask[sl],
                                          self.cfg.clip_eps, importance_weights=importance[sl])
                 if self.cfg.beta:
@@ -567,6 +662,13 @@ class P2TTrainer:
         }
         metrics.update(self._p2t_diagnostics(credit, attribution, raw_rewards, advantages, mask))
         metrics.update(alignment)
+        metrics.update(selection)
+        metrics.update(probability_metrics)
+        if initial_delta is not None:
+            metrics["initial_hf_logp_max_abs_error"] = float(initial_delta.abs().max())
+            metrics["initial_hf_ratio_clip_fraction"] = float(
+                ((initial_delta < math.log1p(-self.cfg.clip_eps))
+                 | (initial_delta > math.log1p(self.cfg.clip_eps))).float().mean())
         metrics.update({f"phase_{key}": value for key, value in timings.items()})
         metrics.update({k: v for k, v in generation_summary.items()
                         if isinstance(v, (int, float, str, bool))})
@@ -583,17 +685,35 @@ class P2TTrainer:
 
     # ----------------------------------------------------------------- reports
     def _p2t_diagnostics(self, credit, attribution, raw_rewards, advantages, mask):
-        """Observation only: nothing here feeds back into the update."""
+        """Observation only: nothing here feeds back into the update.
+
+        Eq. (3) adds `alpha * R * (1 + omega * p_i)` to every token, so the plain
+        bonus-to-advantage ratio is dominated by a per-response *constant* and
+        barely separates a flat attribution softmax from a one-hot one.  The
+        varying part is `alpha * omega * R * (p_i - 1/T)`, and that is what
+        `p2t_varying_bonus_over_advantage` measures.
+        """
         number = mask.sum(-1).float().clamp_min(1)
         weight = credit.weight.to(self.reward_device).masked_fill(~mask, 0)
-        share = weight / number[:, None]
-        valid_share = share[mask]
+        share = (weight / number[:, None]).masked_fill(~mask, 0)
         flat = (share.amax(-1) <= 1.0 / number + 1e-3).float().mean()
         onehot = (share.amax(-1) >= 0.9).float().mean()
+        # ESS/T = 1/(T * sum p^2): 1 is flat (inert), 1/T is one-hot.  Same
+        # direction as the VPO arms' credit ESS, not the inverse.
         ess = 1.0 / (share.square().sum(-1) * number).clamp_min(1e-12)
         valid_attr = attribution.to(self.reward_device)[mask]
-        bonus = credit.direction.to(self.reward_device)[mask]
+        valid_advantage = advantages[:, None].expand_as(mask)[mask]
+        valid_bonus = credit.direction.to(self.reward_device)[mask]
         advantage_scale = advantages.abs().mean().clamp_min(torch.finfo(torch.float32).tiny)
+        # Exactly alpha * omega * R * (share - 1/T): the per-response constant
+        # alpha * R * (1 + omega/T) is subtracted off, leaving only the part that
+        # can move credit between tokens.
+        constant = (self.cfg.alpha * raw_rewards.to(self.reward_device)[:, None]
+                    * (1 + self.cfg.omega / number)).expand_as(mask)
+        varying = valid_bonus - constant[mask]
+        nonzero = valid_advantage != 0
+        sign_flip = (torch.sign(valid_bonus[nonzero]) != torch.sign(valid_advantage[nonzero]))
+        zero_mass = (share[valid_attr == 0].sum() / share.sum().clamp_min(1e-12))
         quantiles = torch.quantile(valid_attr.float(),
                                    torch.tensor([.01, .5, .99], device=valid_attr.device))
         return {
@@ -606,12 +726,14 @@ class P2TTrainer:
             "p2t_attribution_p50": float(quantiles[1]),
             "p2t_attribution_p99": float(quantiles[2]),
             "p2t_share_max_mean": float(share.amax(-1).mean()),
-            "p2t_share_ess_mean": float(ess.mean()),
             "p2t_flat_response_fraction": float(flat),
             "p2t_onehot_response_fraction": float(onehot),
-            "p2t_bonus_abs_mean": float(bonus.abs().mean()),
-            "p2t_bonus_over_advantage": float(bonus.abs().mean() / advantage_scale),
-            # VPO-parity names so the existing plotting/analysis code keeps working.
+            "p2t_bonus_abs_mean": float(valid_bonus.abs().mean()),
+            "p2t_bonus_over_advantage": float(valid_bonus.abs().mean() / advantage_scale),
+            "p2t_varying_bonus_over_advantage": float(varying.abs().mean() / advantage_scale),
+            "p2t_sign_flip_fraction": float(sign_flip.float().mean()) if nonzero.any() else 0.0,
+            "p2t_zero_attribution_share_mass": float(zero_mass),
+            # VPO-parity names so the project's existing analysis keeps working.
             "credit_w_mean": float(weight[mask].mean()),
             "credit_w_std": float(weight[mask].std(unbiased=False)),
             "credit_w_max": float(weight[mask].max()),
@@ -636,6 +758,11 @@ class P2TTrainer:
             raise ValueError("Rollout must contain complete prompt groups")
         if any(reason not in {"stop", "length"} for reason in reasons):
             raise ValueError("Every response requires an explicit stop or length finish reason")
+        # A "stop" row must end in a stop token and a "length" row must fill the
+        # cap; otherwise the truncation count, the long-length penalty and the
+        # degeneracy flags all silently describe the wrong response.
+        validate_response_termination(responses, rmask, reasons, self.stop_token_ids,
+                                      self.cfg.max_response_tokens)
         lengths = rmask.sum(-1)
         if bool(((lengths < 1) | (lengths > self.cfg.max_response_tokens)).any()):
             raise ValueError("Invalid response length")
@@ -645,6 +772,14 @@ class P2TTrainer:
             raise ValueError("Sampled tokens must belong to the policy output support")
         if not torch.isfinite(logprobs[rmask]).all():
             raise ValueError("Sampler log probabilities must be finite")
+
+    def _write_rollout_artifacts(self, prompts, rollout):
+        """Persist the exact prompts and token IDs a step was trained on."""
+        step = self.rollout_index + 1
+        rows = [] if rollout is None else [row[valid].detach().cpu().tolist()
+                                           for row, valid in zip(rollout[3], rollout[4])]
+        (self.output_dir / f"rollout-{step}-tokens.json").write_text(json.dumps(rows))
+        (self.output_dir / f"rollout-{step}-prompts.json").write_text(json.dumps(list(prompts)))
 
     def _log(self, metrics):
         with self.metrics_path.open("a") as handle:
@@ -668,6 +803,10 @@ class P2TTrainer:
         prompts = list(prompts)
         if not prompts:
             raise ValueError("No prompts supplied")
+        if self.cfg.fit_prompt_filter:
+            prompts = self.filter_prompts(prompts)
+            if not prompts:
+                raise ValueError("Every prompt exceeded the token budget")
         self.prepare_sigma0(prompts)
         for _ in range(self.cfg.rollout_iterations):
             start = (self.rollout_index * self.cfg.prompts_per_rollout) % len(prompts)
@@ -685,6 +824,9 @@ class P2TTrainer:
 
 def load_config(path) -> TrainerConfig:
     payload = json.loads(Path(path).read_text())
+    # Keys beginning with "_" are documentation for a human reader; JSON has no
+    # comment syntax and the shipped configs explain their provenance inline.
+    payload = {key: value for key, value in payload.items() if not key.startswith("_")}
     known = {f.name for f in TrainerConfig.__dataclass_fields__.values()}
     unknown = set(payload) - known
     if unknown:
@@ -722,7 +864,8 @@ def main(argv=None):
     if not Path(dataset_path).is_file():
         raise FileNotFoundError(f"training parquet not found: {dataset_path}; "
                                 f"run scripts/prepare_assets.py --download")
-    train_prompts, valid_prompts, split = load_prompt_dataset(dataset_path=dataset_path)
+    train_prompts, valid_prompts, split = load_prompt_dataset(
+        dataset_path=dataset_path, validation_size=config.validation_size)
     trainer = P2TTrainer.from_pretrained(config)
     try:
         if trainer.generation is not None:

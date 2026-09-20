@@ -103,6 +103,28 @@ def test_group_advantages_rejects_singleton_groups_and_bad_eps():
         group_advantages(torch.tensor([1.0, 2.0]), torch.tensor([0, 0]), eps=0.0)
 
 
+def test_share_ess_convention_matches_the_project():
+    """ESS/T = 1/(T*sum p^2): 1 is a FLAT share (inert), 1/T is one-hot.
+
+    The parent project reads its credit ESS the same way -- near one means the
+    weighting is doing nothing -- so this pins the direction that the diagnostics
+    and the reward-curve axis label both depend on.
+    """
+    mask = torch.ones(1, 8, dtype=torch.bool)
+    rewards = torch.tensor([1.0])
+
+    flat, flat_share = p2t_token_reward(torch.zeros(1, 8), rewards, mask)
+    flat_tokens = mask.sum(-1).float()[0]
+    flat_ess = 1.0 / (flat_share.square().sum(-1) * flat_tokens)
+    torch.testing.assert_close(flat_ess, torch.tensor([1.0]), atol=1e-6, rtol=1e-6)
+
+    peaked, peaked_share = p2t_token_reward(torch.tensor([[50.0] + [-50.0] * 7]), rewards, mask)
+    peaked_ess = 1.0 / (peaked_share.square().sum(-1) * flat_tokens)
+    assert float(peaked_ess) < 1.5 / 8, "a one-hot share must drive ESS/T towards 1/T"
+    assert float(peaked_ess) < float(flat_ess)
+    assert torch.isfinite(flat).all() and torch.isfinite(peaked).all()
+
+
 def test_alpha_zero_leaves_only_the_sequence_advantage():
     mask = torch.ones(1, 2, dtype=torch.bool)
     credit = p2t_credit(torch.tensor([2.0]), torch.randn(1, 2), torch.tensor([0.7]), mask,

@@ -197,7 +197,10 @@ class GenerationServer:
                  policy_head_dtype="float32", log_path=None):
         self.socket_path = Path(socket_path)
         self.log_path = Path(log_path) if log_path else None
+        repository_root = str(Path(__file__).resolve().parents[1])
+        inherited = os.environ.get("PYTHONPATH", "")
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpus),
+               "PYTHONPATH": f"{repository_root}{os.pathsep}{inherited}" if inherited else repository_root,
                "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false",
                "VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
         env.pop("PRESENCE_PENALTY", None)

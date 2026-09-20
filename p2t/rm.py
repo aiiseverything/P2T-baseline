@@ -134,10 +134,15 @@ def score_responses(reward_model: nn.Module, reward_tokenizer, rows, mapped: Ten
             attention[j, :len(row)] = 1
         tokens = responses[start:end].to(device)
         valid = response_mask[start:end].to(device) & positions.ge(0)
-        # The RM must be fed exactly the actor's tokens at the mapped positions;
-        # gather_response then zeroes the gradient wherever no mapping exists.
+        # The RM must be fed exactly the actor's tokens at the mapped positions.
         check_response_tokens(ids, attention, positions, tokens, valid)
         reward, grad = reward_input_gradients(reward_model, ids, attention)
+        # The backward graph is over the *canonical reward-model* sequence, whose
+        # width differs from the actor response width and varies per chunk. Gather
+        # onto the actor's response positions before anything else: Eq. (2) needs
+        # [B, T, D] aligned with the sampled tokens, and the gather is also what
+        # zeroes I at positions the reward model never saw.
+        grad = gather_response(grad, positions, valid)
         reward_parts.append(reward.detach().cpu())
         grad_parts.append(grad.detach().cpu())
         del ids, attention, positions, tokens, valid, reward, grad

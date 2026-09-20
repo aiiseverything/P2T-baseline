@@ -68,14 +68,26 @@ raw-utility softmax at τ=1 measured ESS 0.998, mechanism inert). We do not add 
 temperature — the user asked for a strict reproduction — but the run logs the
 diagnostics that reveal it:
 
-* `p2t_share_ess_mean` — `1/Σp²` per response; `→ 1` is one-hot, `→ 1/T` is flat
+* `credit_ess_ratio` — `ESS/T = 1/(T·Σp²)`; `→ 1` is a **flat** softmax (inert),
+  `→ 1/T` is one-hot. This is the same normalisation and the same reading as the
+  VPO-RM arms' quantity of the same name: near one means the weighting is doing
+  nothing.
 * `p2t_flat_response_fraction` — share of responses with `max p ≤ 1/T + 1e-3`
 * `p2t_onehot_response_fraction` — share with `max p ≥ 0.9`
+* `p2t_varying_bonus_over_advantage` — `mean|α·ω·R·(p − 1/T)| / mean|Â|`. This is
+  the part of the token bonus that actually varies across tokens; the plain
+  `p2t_bonus_over_advantage` includes Eq. (3)'s per-response constant
+  `α·R·(1 + ω/T)` and so barely moves between the flat and one-hot regimes.
+* `p2t_sign_flip_fraction` — share of tokens whose `Ã` has the opposite sign to
+  their response's `Â`. Large values mean the constant term, not the outcome,
+  is deciding the update direction.
+* `p2t_zero_attribution_share_mass` — share of the softmax mass landing on tokens
+  with `I = 0` (unmapped tokens and any mapped token with a zero gradient). High
+  values mean the bonus is being spent where the reward model gave no signal.
 
-Note that this ESS has the **opposite** reading from the VPO-RM arms' credit ESS,
-where 1 means uniform weights. It is reported under the same key name
-(`credit_ess_ratio`) only so the project's existing plotting code keeps working;
-treat the two as different quantities.
+Because the paper's α = 0.1 presumes an O(1) reward and Skywork scores are an
+order of magnitude larger, expect Eq. (3)'s constant term to dominate. The
+diagnostics above are what make that visible; nothing rescales it.
 
 ### 2.3 The paper's R is a process reward; ours is a sequence reward
 
@@ -165,4 +177,36 @@ The training protocol is likewise mirrored: 8 prompts × 8 responses, physical
 microbatch 1, lr 5e-5, β 0.03, KL to the frozen initialisation, clip 0.2, AdamW
 with wd 0.01 and grad-norm 1.0, temperature 1.0 with top_p 1.0 / top_k 0, soft
 length window with `advantage_std_floor_fraction` 0.5, and the shared 128-prompt
-σ0 calibration.
+σ0 calibration. The FP32 output head (`policy_head_dtype: float32`), the prompt
+length filter, the rollout importance correction, the resample-then-drop policy
+for wholly-bad prompt groups, and the response-termination check are all ported
+for the same reason.
+
+## 8. Review record
+
+An independent review of the first complete draft found one fatal defect and a
+set of comparability gaps. All were addressed; the list is kept here because
+several of them are the kind of thing a reader would otherwise have to
+rediscover.
+
+| Finding | Disposition |
+|---|---|
+| The RM gradient was checked but never gathered onto actor positions, so `score_responses` returned `[B, L_rm, D]` with a per-chunk width and crashed on `torch.cat` | Fixed in `rm.py`; `tests/p2t/test_rm.py` now covers unequal canonical widths, an autograd oracle for the gathered rows, and microbatch invariance |
+| No prompt length filter, so an over-long prompt would kill a run mid-training instead of being dropped | `filter_prompts` ported and applied before training |
+| Shipped configs carried a `_comment` key the loader rejected | `load_config` ignores keys beginning with `_` |
+| The ESS convention was documented backwards in three places, including the reward-curve axis label | Corrected; `test_share_ess_convention_matches_the_project` pins flat → 1 |
+| `p2t_bonus_over_advantage` is dominated by Eq. (3)'s per-response constant and so cannot detect an inert softmax | `p2t_varying_bonus_over_advantage`, `p2t_sign_flip_fraction`, `p2t_zero_attribution_share_mass` added |
+| `degenerate_responses` was structurally always zero | Now reports the flagged set actually floored |
+| `p2t_unmapped_share_mean` measured token counts, not share mass | `p2t_zero_attribution_share_mass` added |
+| FP32 output head missing on the HF side while vLLM used one | `policy_precision.py` ported and installed; sampler-vs-trainer log-prob agreement now logged |
+| Response termination metadata never validated | `validate_response_termination` ported |
+| No resample/drop for wholly-bad prompt groups | `select_training_rollout` ported |
+| Adapter path reused every step, which can let vLLM serve a cached adapter and silently go off-policy | Distinct `step-N` paths with pruning |
+
+Two further defects were found by the new tests rather than by review: the
+selection packer was indexing rows with group indices, and the group-order
+convention after a resample was undocumented. Both are fixed and pinned.
+
+Residual, deliberate: `select_training_rollout` places first-pass survivors
+before resampled groups, so a step's prompt order is not always the corpus order.
+Group order inside a rollout changes no group-relative quantity.

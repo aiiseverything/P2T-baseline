@@ -21,8 +21,8 @@ PANELS = [
     ("reward_mean", "length-shaped reward (Eq. 4 input)", "reward"),
     ("mean_response_tokens", "response tokens", "tokens"),
     ("response_entropy", "policy entropy", "nats/token"),
-    ("p2t_bonus_over_advantage", "|token bonus| / |A^hat|", "ratio"),
-    ("p2t_share_ess_mean", "attribution softmax ESS", "ESS (1 = one-hot)"),
+    ("p2t_varying_bonus_over_advantage", "|varying token bonus| / |A^hat|", "ratio"),
+    ("credit_ess_ratio", "attribution softmax ESS/T", "1 = flat (inert)"),
 ]
 
 
@@ -84,10 +84,15 @@ def main(argv=None):
         "sigma0": rows[0].get("sigma0"),
         "alpha": rows[0].get("p2t_alpha"),
         "omega": rows[0].get("p2t_omega"),
-        "p2t_share_ess_mean": _mean([row.get("p2t_share_ess_mean") for row in rows]),
+        "credit_ess_ratio": _mean([row.get("credit_ess_ratio") for row in rows]),
         "p2t_flat_response_fraction": _mean([row.get("p2t_flat_response_fraction") for row in rows]),
         "p2t_onehot_response_fraction": _mean([row.get("p2t_onehot_response_fraction") for row in rows]),
         "p2t_bonus_over_advantage": _mean([row.get("p2t_bonus_over_advantage") for row in rows]),
+        "p2t_varying_bonus_over_advantage": _mean(
+            [row.get("p2t_varying_bonus_over_advantage") for row in rows]),
+        "p2t_sign_flip_fraction": _mean([row.get("p2t_sign_flip_fraction") for row in rows]),
+        "p2t_zero_attribution_share_mass": _mean(
+            [row.get("p2t_zero_attribution_share_mass") for row in rows]),
         "p2t_unmapped_share_mean": _mean([row.get("p2t_unmapped_share_mean") for row in rows]),
         "mean_response_tokens": _mean([row.get("mean_response_tokens") for row in rows]),
         "elapsed_sec_total": sum(row.get("elapsed_sec") or 0 for row in rows),
