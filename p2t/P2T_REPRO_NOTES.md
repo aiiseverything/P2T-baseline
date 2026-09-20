@@ -89,6 +89,37 @@ diagnostics that reveal it:
   model gave no signal. It reads 1.0 by construction when the whole attribution
   vector is zero, which is the fully inert case.
 
+### Measured: the token term is inert at this reward scale
+
+An independent audit sampled eight responses from the real `Qwen3-14B-Base`
+under the rollout contract and scored them with the real Skywork reward model
+through the shipped mapping. The result is the failure mode this section
+predicts, quantified:
+
+| quantity | measured |
+|---|---|
+| attribution spread `std(I)` | 0.007 - 0.029 |
+| Eq. (3) softmax `ESS/T` | **0.9992 - 0.99995** |
+| `p2t_flat_response_fraction` | **1.0** |
+| the token-*varying* part of `A~`, relative to the update scale | **2.2e-6** |
+
+At `T ~ 821` the attribution range spans only about `exp(0.5)`, so no token can
+take more than ~2.4x its uniform share. **This is not the null token's doing**:
+`<|endoftext|>`, `<|im_end|>`, the RM's own `<|vision_pad|>`, `<|fim_pad|>`, a
+zero embedding and the vocabulary mean all give `ESS/T` between 0.99980 and
+0.99989. The spread is set by `grad R . e_i`; the untempered `exp` in Eq. (3)
+is what discards it.
+
+The practical reading is that this arm, as the paper specifies it, is GRPO with
+the advantage shifted by roughly `alpha*R`. That is a property of
+(paper formula + sequence-level reward + long responses), and it is reported as
+a result rather than repaired -- the same call the p9c post-mortem made for the
+VPO allocator's own untuned softmax.
+
+`p2t_bonus_over_advantage` cannot see this: it printed 1.06387 identically to
+six digits in the flat, measured and one-hot regimes. `credit_ess_ratio` and
+`p2t_flat_response_fraction` are the metrics that can.
+
 A reading caveat on `p2t_varying_bonus_over_advantage`: for a one-hot share it
 equals `2αω|R|(1 − 1/T)/T`, so it shrinks with response length in *both* regimes.
 Only the flat-versus-peaked contrast carries information, not the absolute value.
