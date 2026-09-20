@@ -1,0 +1,23 @@
+{
+  "run": "p2t250",
+  "rollouts": 5,
+  "raw_reward_first": 0.3411598205566406,
+  "raw_reward_last": 3.2911148071289062,
+  "raw_reward_mean": 3.2414356231689454,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9965043783187866,
+  "p2t_flat_response_fraction": 0.55625,
+  "p2t_onehot_response_fraction": 0.0,
+  "p2t_bonus_over_advantage": 0.8243593513965607,
+  "p2t_varying_bonus_over_advantage": 3.9071064747986384e-05,
+  "p2t_sign_flip_fraction": 0.09042395632714033,
+  "p2t_zero_attribution_share_mass": 0.021219160035252572,
+  "p2t_unmapped_share_mean": 0.004028582898899913,
+  "mean_response_tokens": 273.0125,
+  "elapsed_sec_total": 1473.7413646478672,
+  "actor_peak_gb": 37.47855758666992,
+  "reward_peak_gb": 23.265069484710693,
+  "figure": "/tmp/title_test.png"
+}

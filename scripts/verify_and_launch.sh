@@ -35,13 +35,20 @@ echo "=== 3/4 launch (setsid+nohup: survives this terminal and this session) ===
 bash scripts/start_detached.sh "$RUN" || exit 1
 
 echo
-echo "=== 4/4 watcher (redraws curves, checks health, also detached) ==="
+echo "=== 4/4 watcher (one figure per completed step, also detached) ==="
 REPORT="${ROOT}/$("$PY" -c "import json,sys;print(json.load(open(sys.argv[1])).get('report_dir') or '')" \
   "configs/${RUN}.json")"
 [ -n "$REPORT" ] || REPORT="${ROOT}/runs/${RUN}/report"
 mkdir -p "$REPORT"
-setsid nohup bash scripts/watch_run.sh "$RUN" 300 >/dev/null 2>&1 &
-echo "watcher started (every 300s), health log: ${REPORT}/health.log"
+# 30s is the *poll* interval, not the plot interval: watch_run.sh redraws once per
+# new rollout in metrics.jsonl and archives a numbered copy under steps/.  A step
+# takes ~5 min, so polling every 30s keeps each figure within half a minute of the
+# step that produced it.
+setsid nohup bash scripts/watch_run.sh "$RUN" 30 >/dev/null 2>&1 &
+echo "watcher started (one figure per step, polling every 30s)"
+echo "  live figure:   ${REPORT}/reward.png"
+echo "  per-step:      ${REPORT}/steps/step-NNNN.png"
+echo "  health log:    ${REPORT}/health.log"
 
 echo
 echo "Follow it with:  bash scripts/status.sh ${RUN}"

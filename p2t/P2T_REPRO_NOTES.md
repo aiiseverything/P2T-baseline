@@ -467,7 +467,8 @@ numbers:
 
 Disk: each step writes a 1.0 MiB credit dump plus about 0.25 MiB of prompt/token
 JSON, so 250 steps is about 320 MiB, and `keep_adapters=2` caps the vLLM adapter
-directory at about 2.0 GiB. Against 9.2 TiB free this is not a constraint.
+directory at about 3.9 GiB: two snapshots of 2.0 GiB each, four times the
+0.5 GiB the pruning docstring claimed before it was corrected. Against 9.2 TiB free this is not a constraint.
 
 ## 12. Checkpoints, and what a restart does and does not preserve
 
@@ -520,3 +521,68 @@ the physical microbatch is already 1, so those levers are spent. If
 `actor_peak_gb` ever approaches ~42 GiB the remaining lever is
 `token_chunk_size` (128 -> 64), which trades throughput in
 `selected_logp_from_logits` and `response_entropy` for a smaller transient.
+
+## 13. Two process-management defects found while restarting
+
+Both cost a failed attempt, and both are now fixed in `scripts/stop_run.sh`.
+
+### 13.1 `pkill -f` matched the shell that was running it
+
+An inline `pkill -f "watch_run.sh formal250"` killed its own shell mid-sequence
+and returned exit 144. `-f` matches against whole command lines, and the shell's
+own command line contained that literal string. The stop aborted before it
+reached the trainer, so the run survived but the watcher was killed and the
+archive step never ran. The fix addresses the trainer by its recorded pid and
+filters every pattern match against the script's own process tree.
+
+### 13.2 vLLM's workers rewrite their process titles, so pattern matching misses them
+
+Killing the `p2t.vllm_server` parent left the GPUs allocated:
+
+```
+24051, VLLM::Worker_TP0, 38696 MiB
+24052, VLLM::Worker_TP1, 38696 MiB
+```
+
+vLLM spawns its engine core and tensor-parallel workers as separate processes and
+renames them, so neither `p2t.vllm_server` nor `EngineCore` nor `VllmWorker`
+reliably matches what actually holds memory. The parent exits, the children keep
+their 38.7 GiB each, and the next launch is refused by the free-GPU preflight.
+The teardown now asks the driver directly via
+`nvidia-smi --query-compute-apps=pid` and kills whatever it names, which is
+authoritative regardless of how a process titles itself.
+
+The preflight gate did its job here: it refused to start a run that would have hit
+OOM, rather than letting it fail 40 minutes in.
+
+## 14. Revised timing: the formal run is about half the estimate
+
+The smoke measured 462-595 s per step. The formal run measures **212 s per step**,
+so 250 rollouts is roughly **14.7 hours**, not the 30 the plan budgeted.
+
+The cause is the shared `sigma0`. The smoke self-calibrated to 6.7349; the formal
+run uses the 3.0323 agreed with the sibling arms. The soft length window is
+expressed in units of `sigma0`, so halving it roughly doubles the length penalty,
+and mean response length fell from 627 tokens to 293. Every stage that scales with
+response length -- generation, both log-probability forwards, and the actor update
+-- shrank with it. Peak actor memory fell too, from 38.6 GiB to 34.7 GiB.
+
+This is a real behavioural difference between the arms, not just a speedup: the
+formal run is training on visibly shorter responses than the smoke did. It is the
+intended configuration, since the shared `sigma0` is what makes the arms
+comparable, but the length distribution should be reported alongside the reward
+curve rather than left implicit.
+
+### Restart history for this run
+
+Three launches, of which only the third is the run of record:
+
+1. `p2t250-attempt1-no-ckpt`, 7 rollouts, archived. Stopped deliberately: it was
+   launched with `checkpoint_interval: 0`, so a crash would have cost everything.
+2. A stop attempt that killed its own shell (§13.1) and left the vLLM workers
+   holding both generation GPUs (§13.2), so the relaunch was refused by the
+   free-GPU preflight.
+3. The current run, pid 38325, with periodic checkpointing and one figure per step.
+
+The archived attempt's metrics are kept under `runs/_archive/` and
+`reports/_archive/` for comparison, with its adapter snapshots deleted.

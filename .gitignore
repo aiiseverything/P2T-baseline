@@ -25,3 +25,9 @@ paper/
 
 # 3.1 GiB of pre-fetched CUDA wheels: fetched, never committed.
 .wheels/
+
+# Per-step monitoring snapshots. The watcher archives one figure per rollout, so
+# a 250-step run leaves ~250 PNGs (~55 MB). They are a live-watching convenience,
+# not a deliverable: the committed artifacts stay metrics.jsonl, the current
+# reward.png and summary.json. The files remain on disk for inspection.
+reports/*/steps/

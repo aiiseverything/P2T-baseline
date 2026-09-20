@@ -390,7 +390,16 @@ class P2TTrainer:
         return rollout, summary
 
     def _prune_adapters(self):
-        """Keep only the newest adapters: each one is ~0.5 GiB on disk."""
+        """Keep only the newest adapters: each one is ~2.0 GiB on disk.
+
+        Measured at 2.0 GiB per snapshot, four times the 0.5 GiB this docstring
+        used to claim, so two retained snapshots cost 3.9 GiB rather than 1 GiB.
+
+        Two, not one, is deliberate: vLLM loads an adapter by directory path, so
+        keeping the previous snapshot leaves a buffer across the write-new,
+        switch-server, drop-old sequence. Pruning to a single snapshot would race
+        the generation server against a directory it may still be referencing.
+        """
         paths = sorted(self.adapter_root.glob("step-*"),
                        key=lambda path: int(path.name.split("-")[1]))
         for stale in paths[:max(0, len(paths) - self.cfg.keep_adapters)]:

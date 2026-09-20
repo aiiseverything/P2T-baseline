@@ -50,10 +50,21 @@ else
 fi
 
 echo "=== 3. leftover generation processes ==="
-for _ in 1 2; do
-  ORPHANS="$(pgrep -f "p2t\.vllm_server" 2>/dev/null || true)"
-  [ -n "$ORPHANS" ] || { echo "  none"; break; }
-  safe_kill KILL $ORPHANS
+# Pattern matching is not enough here.  vLLM spawns its engine core and its
+# tensor-parallel workers as separate processes and rewrites their titles to
+# "VLLM::EngineCore" / "VllmWorker-N", so a pgrep for "p2t.vllm_server" misses
+# them: the parent dies, the children keep the GPUs, and the next launch is
+# refused by the free-GPU gate.  Ask the driver who actually holds memory instead
+# of guessing from command lines.
+for attempt in 1 2 3; do
+  HOLDERS="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
+             | tr -d ' ' | tr '\n' ' ')"
+  [ -n "${HOLDERS// /}" ] || { echo "  no process holds GPU memory"; break; }
+  echo "  attempt ${attempt}: GPU memory held by pids ${HOLDERS}"
+  for pid in $HOLDERS; do
+    ps -o pid,args --no-headers -p "$pid" 2>/dev/null | cut -c1-100 | sed 's/^/    /'
+  done
+  safe_kill KILL $HOLDERS
   sleep 12
 done
 
