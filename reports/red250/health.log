@@ -102,3 +102,20 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /ho
 rollout 24: raw_reward 0.6478042602539062, loss 16.68772581126541, grad_norm 1.3639650344848633, tokens 1289.015625, token_reward_abs_mean 0.9935745596885681, flip 0.0681479275226593
   note: redistributed credit is very flat (mean max share 0.0164)
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0025.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 25: raw_reward -4.4245452880859375, loss 33.05599445849657, grad_norm 3.1948330402374268, tokens 1397.515625, token_reward_abs_mean 0.9685313105583191, flip 0.0009391665807925165
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0009); see RED_REPRO_NOTES 2.6
+  PROBLEM: 33/64 responses were truncated
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0026.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 26: raw_reward -6.784423828125, loss 60.6894214451313, grad_norm 1.2475680112838745, tokens 1753.453125, token_reward_abs_mean 0.8290420174598694, flip 0.0
+  note: redistributed credit is very flat (mean max share 0.0117)
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0000); see RED_REPRO_NOTES 2.6
+  PROBLEM: 43/64 responses were truncated
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0027.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 27: raw_reward -3.35931396484375, loss 59.020352482795715, grad_norm 1.1339036226272583, tokens 1823.625, token_reward_abs_mean 0.7286708354949951, flip 8.683118721819483e-06
+  note: redistributed credit is very flat (mean max share 0.0117)
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0000); see RED_REPRO_NOTES 2.6
+  PROBLEM: 43/64 responses were truncated
