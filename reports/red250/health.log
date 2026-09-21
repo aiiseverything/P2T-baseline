@@ -284,3 +284,28 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0059.pn
 wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
 rollout 59: raw_reward -9.893798828125, loss 20.38816817267798, grad_norm 40.57612991333008, tokens 17.109375, token_reward_abs_mean 1.5710582733154297, flip 0.029223743826150894
   PROBLEM: response length falling -144 tokens/rollout
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0060.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 60: raw_reward -6.4983978271484375, loss 10.758952161340858, grad_norm 43.76339340209961, tokens 7.15625, token_reward_abs_mean 2.5433435440063477, flip 0.09606987237930298
+  PROBLEM: response length falling -95 tokens/rollout
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0061.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 61: raw_reward -5.924224853515625, loss 3.9024350163526833, grad_norm 41.71382522583008, tokens 4.71875, token_reward_abs_mean 2.944888114929199, flip 0.15231788158416748
+  PROBLEM: response length falling -81 tokens/rollout
+  PROBLEM: entropy falling -0.8793 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0062.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 62: raw_reward -8.161865234375, loss 3.8830093757715076, grad_norm 36.946353912353516, tokens 3.34375, token_reward_abs_mean 4.045698165893555, flip 0.17757008969783783
+  PROBLEM: response length falling -54 tokens/rollout
+  PROBLEM: entropy falling -1.1375 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0063.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 63: raw_reward -7.8421173095703125, loss 1.907430385472253, grad_norm 60.6133918762207, tokens 2.40625, token_reward_abs_mean 4.205904960632324, flip 0.13636364042758942
+  PROBLEM: response length falling -38 tokens/rollout
+  PROBLEM: entropy falling -1.4057 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0064.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 64: raw_reward -10.20654296875, loss 5.901346982253017, grad_norm 57.05537414550781, tokens 2.078125, token_reward_abs_mean 4.022388458251953, flip 0.02255639061331749
+  PROBLEM: response length falling -27 tokens/rollout
+  PROBLEM: entropy falling -1.7116 nats/rollout (collapse?)
+  PROBLEM: KL to init is 5.19; the policy has drifted far
