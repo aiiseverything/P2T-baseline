@@ -215,6 +215,13 @@ def rloo_baseline(returns: Tensor, group_ids: Tensor) -> Tensor:
     """
     if returns.ndim != 1 or group_ids.shape != returns.shape:
         raise ValueError("returns and group_ids must have shape [B]")
+    if returns.device != group_ids.device:
+        # The mask/select below would raise a cryptic torch error; say what broke
+        # instead.  RED assembles credit on the actor device while the group ids
+        # are built where the reward model runs, so this is the seam that fails.
+        raise ValueError(f"returns are on {returns.device} but group_ids are on "
+                         f"{group_ids.device}; the leave-one-out baseline indexes "
+                         f"one with the other")
     if returns.is_complex() or not torch.isfinite(returns).all():
         raise ValueError("returns must be real and finite")
     baseline = torch.empty_like(returns, dtype=torch.float32)
@@ -304,12 +311,21 @@ def rloo_red_credit(final_reward: Tensor, baseline: Tensor,
     than a new algorithm: replacing the sequence return with RED's return instead
     would cancel the dynamic-initialisation offset inside the leave-one-out mean
     and reproduce plain RLOO exactly.
+
+    Note that a token the reward model never saw still receives a *non-zero*
+    advantage: its redistributed reward is zero by construction, but the baseline
+    (and the KL term inside ``r^final``) is not, so ``A = -b_i - beta*KL``.  That
+    follows from the R3 rule as specified and is not an oversight -- only the
+    redistribution itself is zero there.
     """
     mask = _binary_mask(response_mask)
     if final_reward.shape != mask.shape:
         raise ValueError("final_reward must be [B, T] matching response_mask")
     if baseline.shape != (mask.shape[0],):
         raise ValueError("baseline must be [B] matching response_mask")
+    if final_reward.device != baseline.device:
+        raise ValueError(f"final_reward is on {final_reward.device} but the baseline "
+                         f"is on {baseline.device}")
     if not torch.isfinite(baseline).all():
         raise ValueError("baseline must be finite")
     advantage = (final_reward.float() - baseline.float()[:, None]).masked_fill(~mask, 0.0)

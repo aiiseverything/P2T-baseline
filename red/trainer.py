@@ -11,9 +11,18 @@ Two things do *not* mirror the project, both of them forced by the paper:
 * The KL penalty lives inside the reward (Eq. 8), so no separate KL loss term is
   applied here and the credit step runs *after* the reference log-probs rather
   than before.
-* The surrogate is REINFORCE with RLOO's leave-one-out baseline: no importance
-  ratio and no clipping, which is what RLOO's own paper prescribes.  ``clip_eps``
-  is accepted from the shared config for parity and is deliberately unread.
+* The surrogate is REINFORCE with RLOO's leave-one-out baseline.  Nothing is ever
+  clamped, which is what RLOO's own paper prescribes.  ``clip_eps`` is still
+  accepted from the shared config and is read in three places, none of which clips
+  the objective: the config validation, the ``rollout_direct_ratio_clip_fraction``
+  metric, and the startup gate that checks the trainer's re-forward reproduces the
+  sampler's probabilities.  Setting it to 0 or 1 to mean "no clipping" fails the
+  validation rather than disabling anything.
+* The one importance-like factor is the sampler-to-trainer correction
+  ``exp(old_logp - rollout_logprob)``, which multiplies the objective.  It is a
+  numerical fix for running the sampler and the trainer in different kernels --
+  the startup gate asserts it is ~1 -- not a clipping device, and it is not part
+  of RLOO's Eq. (11).  RED_REPRO_NOTES 2.8 records it.
 
 Where RED is *cheaper* than VPO-RM: it needs no policy logits and no gradient
 through the reward model to build credit -- one forward pass over the canonical
@@ -24,8 +33,7 @@ time.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 import json
 import math
 import os
@@ -671,6 +679,14 @@ class REDTrainer:
         # assembled once the reference log-probs exist -- the opposite of the
         # sibling arms, which build credit first and add the KL as a separate loss
         # term afterwards.  The consequence is that no KL term appears below.
+        #
+        # Everything here lives on the actor device, including the group ids, which
+        # are otherwise built on the reward device.  The sibling arm can build
+        # credit on the reward device and move the three [B, T] fields afterwards;
+        # RED cannot, because Eq. (8) needs the reference log-probs.  Mixing the
+        # two is a crash on the first rollout that no CPU test can see, so the
+        # credit functions validate their own device arguments.
+        credit_group_ids = group_ids.to(self.actor_device)
         actor_mask = rmask.to(self.actor_device)
         kl_reward = red_kl_reward(old_logp, ref_logp, actor_mask)
         sequence_reward = sequence_reward_at_eos(raw_rewards.to(self.actor_device), actor_mask)
@@ -684,7 +700,7 @@ class REDTrainer:
         # the advantage in an arm that does not standardise.
         returns = sequence_returns(shaped.to(self.actor_device), kl_reward, actor_mask,
                                    self.cfg.beta)
-        baseline = rloo_baseline(returns, group_ids)
+        baseline = rloo_baseline(returns, credit_group_ids)
         credit = rloo_red_credit(final_reward, baseline, actor_mask)
         del kl_reward, sequence_reward, final_reward, returns
         clock = phase("credit_sec", clock)
@@ -749,12 +765,13 @@ class REDTrainer:
         self.total_tokens += int(rmask.sum().item())
         self.rollout_index += 1
 
-        mask = rmask.to(self.reward_device)
         with torch.no_grad():
-            # Same estimator and weighting as the project's reference-KL metric.
-            delta = (ref_logp - old_logp).masked_fill(~rmask, 0)
-            kl_values = (torch.expm1(delta) - delta) * importance.detach()
-            kl_to_init = float(kl_values.masked_fill(~rmask, 0).sum() / rmask.sum())
+            # Same estimator and weighting as the project's reference-KL metric, so
+            # the drift curve is comparable with the sibling arms'.  Note this is
+            # *not* the KL that Eq. (8) subtracts -- the reward uses the signed log
+            # ratio (see RED_REPRO_NOTES 2.5).
+            kl_to_init = float(kl_metric(ref_logp, old_logp, rmask,
+                                         importance_weights=importance))
         metrics = {
             "rollout": self.rollout_index,
             "loss": loss_value,
@@ -790,7 +807,7 @@ class REDTrainer:
             "gpu_hours": (time.monotonic() - self.started) * (
                 2 + self.cfg.vllm_tensor_parallel_size) / 3600,
         }
-        metrics.update(self._red_diagnostics(credit, baseline, mask))
+        metrics.update(self._red_diagnostics(credit, baseline, actor_mask))
         metrics.update(alignment)
         metrics.update(selection)
         metrics.update(self._adapter_identity)
@@ -857,6 +874,9 @@ class REDTrainer:
         mass = valid_reward.abs().sum().clamp_min(1e-12)
         return {
             "red_beta_c": self.cfg.beta_c,
+            # The KL coefficient also rides inside the reward (Eq. 8), so it is a
+            # method constant and is stamped per row like beta_c.
+            "red_beta": self.cfg.beta,
             "red_protocol": RED_PROTOCOL,
             "red_advantage_rule": RLOO_ADVANTAGE_RULE,
             "red_token_reward_mean": float(valid_reward.mean()),

@@ -192,9 +192,17 @@ def score_prefixes(reward_model: nn.Module, reward_tokenizer, rows, mapped: Tens
         # actor tokens so that the trailing special token the RM pools at is
         # carried by the last mapped response token instead of being dropped.
         left, right = prefix_boundaries(positions, pooled)
+        # Masked with the *actor* response mask, not ``& positions.ge(0)``.  The
+        # intersection can empty a row -- an immediate-stop response is a single
+        # special token, which is never mappable by construction -- and an empty
+        # row fails the "at least one valid token" check, aborting the run on a
+        # response the trainer deliberately trains on.  The intersection is also
+        # redundant: ``prefix_boundaries`` gives unmapped positions right == left,
+        # so their difference is already exactly zero and only the padded slots
+        # need excluding.
         token = prefix_token_rewards(scores[rows_index[:, None], right],
                                      scores[rows_index[:, None], left],
-                                     response_mask[start:end].to(device) & positions.ge(0))
+                                     response_mask[start:end].to(device))
         reward_parts.append(rewards.detach().cpu())
         token_parts.append(token.detach().cpu())
         del ids, attention, positions, tokens, valid, scores, pooled, left, right, token

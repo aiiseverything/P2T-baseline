@@ -69,14 +69,15 @@ def rloo_policy_loss(new_logp: Tensor, advantage: Tensor, response_mask: Tensor,
 
 def kl_metric(base_logp: Tensor, new_logp: Tensor, response_mask: Tensor, *,
               importance_weights: Tensor | None = None) -> Tensor:
-    """The project's KL estimator, reported only as the ``kl_to_init`` metric.
+    """The project's KL estimator, reported as the ``kl_to_init`` metric.
 
-    ``exp(d) - d - 1`` with ``d = log p_ref - log p_new``, identical to
-    ``p2t/loss.py:kl_from_logp`` so the RED arm's drift curve is directly
-    comparable with its siblings'.  This estimator is **not** what Eq. (8)
-    subtracts: the reward uses the signed log ratio, this uses a non-negative
-    second-order estimator.  Keeping them separate is the point -- the metric
-    stays comparable and the reward stays as the paper writes it.
+    ``exp(d) - d - 1`` with ``d = log p_base - log p_new``, reduced as a
+    *token-weighted* mean over the batch -- the reduction the sibling arm's inline
+    computation uses, so the two arms' drift curves are directly comparable.
+
+    This estimator is **not** what Eq. (8) subtracts: the reward uses the signed
+    log ratio.  Keeping them separate is the point -- the metric stays comparable
+    with the project and the reward stays as the paper writes it.
     """
     mask = _binary_mask(response_mask)
     if base_logp.shape != mask.shape or new_logp.shape != mask.shape:
@@ -86,5 +87,4 @@ def kl_metric(base_logp: Tensor, new_logp: Tensor, response_mask: Tensor, *,
     values = torch.expm1(delta) - delta
     if importance_weights is not None:
         values = values * importance_weights.detach().float().masked_fill(~mask, 1)
-    per_response = values.masked_fill(~mask, 0).sum(-1) / mask.sum(-1).float()
-    return per_response.mean()
+    return values.masked_fill(~mask, 0).sum() / mask.sum().float()
