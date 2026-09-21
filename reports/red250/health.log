@@ -157,3 +157,15 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /ho
 rollout 34: raw_reward -5.365478515625, loss 56.14577572909184, grad_norm 5.723134517669678, tokens 1202.390625, token_reward_abs_mean 0.5874119400978088, flip 0.00025989889400079846
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0003); see RED_REPRO_NOTES 2.6
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0035.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 35: raw_reward -4.2166748046875, loss 48.627747440943494, grad_norm 2.185616970062256, tokens 1338.046875, token_reward_abs_mean 0.524613618850708, flip 0.0003386465832591057
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0003); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -239 tokens/rollout
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0036.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 36: raw_reward -8.591522216796875, loss 78.10831286758184, grad_norm 1.6682109832763672, tokens 1650.328125, token_reward_abs_mean 0.6636590957641602, flip 0.0
+  note: redistributed credit is very flat (mean max share 0.0183)
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0000); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -218 tokens/rollout
+  PROBLEM: 40/64 responses were truncated
