@@ -58,3 +58,23 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0014.pn
 wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
 rollout 14: raw_reward 5.4257354736328125, loss -5.650845570489764, grad_norm 0.8021275401115417, tokens 370.375, token_reward_abs_mean 1.4100130796432495, flip 0.02775902859866619
   PROBLEM: response length falling -88 tokens/rollout
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0015.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 15: raw_reward 4.056728363037109, loss -3.4724280590889975, grad_norm 0.9642378687858582, tokens 284.859375, token_reward_abs_mean 1.5408856868743896, flip 0.06324392557144165
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0016.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 16: raw_reward 6.2227325439453125, loss -5.733712361718062, grad_norm 1.3953921794891357, tokens 346.40625, token_reward_abs_mean 1.5123999118804932, flip 0.039693281054496765
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0017.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 17: raw_reward 4.96722412109375, loss -5.976765315979719, grad_norm 1.249082088470459, tokens 438.171875, token_reward_abs_mean 1.35936439037323, flip 0.0527404360473156
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0018.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 18: raw_reward 4.3536376953125, loss -4.48266383826558, grad_norm 0.889907956123352, tokens 451.171875, token_reward_abs_mean 1.4194929599761963, flip 0.0838787853717804
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0019.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 19: raw_reward 7.030193328857422, loss -7.677280838979641, grad_norm 1.2580174207687378, tokens 519.421875, token_reward_abs_mean 1.417325735092163, flip 0.05474836751818657
+  ok
