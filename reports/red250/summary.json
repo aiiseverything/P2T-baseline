@@ -1,18 +1,18 @@
 {
   "run": "red250",
-  "rollouts": 39,
+  "rollouts": 40,
   "raw_reward_first": 0.48187255859375,
-  "raw_reward_last": -7.33892822265625,
-  "raw_reward_mean": 0.3623880728697165,
+  "raw_reward_last": -8.6031494140625,
+  "raw_reward_mean": 0.13824963569641113,
   "beta_c": 1.0,
   "advantage_rule": "loo_scalar_baseline_r3",
   "redistribution_protocol": "prefix_difference_eq6",
-  "credit_ess_ratio": 0.21416327357292175,
-  "advantage_flip_fraction": 0.00018160590843763202,
-  "mean_response_tokens": 845.9042467948718,
-  "kl_to_init_last": 0.10853664577007294,
+  "credit_ess_ratio": 0.23807290196418762,
+  "advantage_flip_fraction": 0.0013272182550281286,
+  "mean_response_tokens": 851.2453125,
+  "kl_to_init_last": 0.112123504281044,
   "sigma0": 3.0323000897825447,
   "actor_peak_gb": 39.77443504333496,
   "reward_peak_gb": 14.461010932922363,
-  "figure": "red250/reward.png"
+  "figure": "red250/steps/step-0040.png"
 }

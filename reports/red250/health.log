@@ -184,3 +184,4 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /ho
 rollout 39: raw_reward -7.33892822265625, loss 65.5412755087018, grad_norm 2.837327480316162, tokens 1204.53125, token_reward_abs_mean 0.6312065124511719, flip 0.00018160590843763202
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0002); see RED_REPRO_NOTES 2.6
   PROBLEM: response length falling -298 tokens/rollout
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0040.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
