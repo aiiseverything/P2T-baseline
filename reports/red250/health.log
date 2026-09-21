@@ -219,3 +219,21 @@ rollout 46: raw_reward -7.85626220703125, loss 44.864464848535135, grad_norm 2.1
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0050); see RED_REPRO_NOTES 2.6
   PROBLEM: response length falling -381 tokens/rollout
   PROBLEM: entropy falling -0.5636 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0047.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 47: raw_reward -5.80712890625, loss 32.49736990756355, grad_norm 8.884593963623047, tokens 358.6875, token_reward_abs_mean 0.8449395895004272, flip 0.0033978044521063566
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0034); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -399 tokens/rollout
+  PROBLEM: entropy falling -0.7763 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0048.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 48: raw_reward -9.833328247070312, loss 54.88809730671346, grad_norm 3.2007579803466797, tokens 469.671875, token_reward_abs_mean 0.7208443880081177, flip 0.003692737314850092
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0037); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -508 tokens/rollout
+  PROBLEM: entropy falling -0.7166 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0049.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 49: raw_reward -10.6732177734375, loss 63.618361255619675, grad_norm 4.0563483238220215, tokens 386.328125, token_reward_abs_mean 0.7193966507911682, flip 0.0015773508930578828
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0016); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -549 tokens/rollout
+  PROBLEM: entropy falling -0.4515 nats/rollout (collapse?)
