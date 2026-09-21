@@ -209,3 +209,13 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /ho
 rollout 44: raw_reward -8.5914306640625, loss 62.64066635479685, grad_norm 2.6420223712921143, tokens 898.09375, token_reward_abs_mean 0.5763939619064331, flip 0.00022617349168285728
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0002); see RED_REPRO_NOTES 2.6
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0045.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 45: raw_reward -6.820281982421875, loss 49.054505282547325, grad_norm 2.268951177597046, tokens 678.21875, token_reward_abs_mean 0.7033477425575256, flip 0.02437451109290123
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0046.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 46: raw_reward -7.85626220703125, loss 44.864464848535135, grad_norm 2.1095263957977295, tokens 509.125, token_reward_abs_mean 0.6651546359062195, flip 0.004971765447407961
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0050); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -381 tokens/rollout
+  PROBLEM: entropy falling -0.5636 nats/rollout (collapse?)
