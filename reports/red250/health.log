@@ -141,3 +141,19 @@ rollout 31: raw_reward -7.101251602172852, loss 70.76026257872581, grad_norm 1.7
   note: redistributed credit is very flat (mean max share 0.0185)
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0000); see RED_REPRO_NOTES 2.6
   PROBLEM: 40/64 responses were truncated
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0032.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 32: raw_reward -7.7178955078125, loss 76.38217612355947, grad_norm 1.5631569623947144, tokens 1635.359375, token_reward_abs_mean 0.6470954418182373, flip 4.7772373363841325e-05
+  note: redistributed credit is very flat (mean max share 0.0175)
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0000); see RED_REPRO_NOTES 2.6
+  PROBLEM: 38/64 responses were truncated
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0033.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 33: raw_reward -7.649566650390625, loss 71.8265037862584, grad_norm 14.9727783203125, tokens 1541.484375, token_reward_abs_mean 0.6121529340744019, flip 6.0818005295004696e-05
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0001); see RED_REPRO_NOTES 2.6
+  PROBLEM: 37/64 responses were truncated
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0034.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 34: raw_reward -5.365478515625, loss 56.14577572909184, grad_norm 5.723134517669678, tokens 1202.390625, token_reward_abs_mean 0.5874119400978088, flip 0.00025989889400079846
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0003); see RED_REPRO_NOTES 2.6
+  ok
