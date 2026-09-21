@@ -108,7 +108,7 @@ def test_a_sustained_decline_is_still_caught(tmp_path, capsys):
     """Enough points, and a genuine collapse must still be reported."""
     module = _load()
     rows = [_healthy(i + 1, mean_response_tokens=700.0 - 60 * i,
-                     response_entropy=1.8 - 0.1 * i) for i in range(8)]
+                     response_entropy=1.8 - 0.1 * i) for i in range(12)]
     assert module.main(["--report", str(_report(tmp_path, rows))]) == 1
     out = capsys.readouterr().out
     assert "falling" in out

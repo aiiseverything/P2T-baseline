@@ -15,20 +15,36 @@ import math
 from pathlib import Path
 
 
-def rate(rows, field, window, min_points=5):
-    """Per-rollout slope of ``field`` over the last ``window`` rollouts.
+def rate(rows, field, window, min_points=10):
+    """Per-rollout shift in ``field``, or None if it is within the window's noise.
 
-    ``min_points`` exists because two points are not a trend.  With the old
-    two-point minimum, a single noisy step-to-step difference was reported as
-    "response length falling" or "entropy collapsing" -- both fired on the smoke
-    run at step 3, when the run was healthy.  Rollout-to-rollout variation in
-    length and entropy is large, so a slope only means something across several
-    steps.
+    This began as the slope between the window's first and last point, which let
+    two endpoints decide the verdict.  Over the formal run's first 102 rollouts
+    that produced 24 false alarms out of 26: "response length falling" fired 12
+    times while length was in fact *rising* (mean 365 over rollouts 1-51 against
+    396 over 52-102), and "entropy collapsing" 12 times while entropy was flat
+    (0.693 -> 0.669 across the same halves).  Mean response length carries a
+    standard deviation near 108 tokens on a mean of 396, so any two endpoints
+    differ mostly by noise, and the sign of a short-window slope is close to a
+    coin flip.
+
+    Comparing the first half's mean against the second half's, and requiring the
+    gap to exceed the window's own standard deviation, tests the shift against the
+    scatter that could produce it by chance.  A 108-token wobble cannot clear that
+    bar; a sustained collapse can.
     """
     values = [row.get(field) for row in rows[-window:] if isinstance(row.get(field), (int, float))]
     if len(values) < max(2, min_points):
         return None
-    return (values[-1] - values[0]) / (len(values) - 1)
+    half = len(values) // 2
+    early = sum(values[:half]) / half
+    late = sum(values[half:]) / (len(values) - half)
+    shift = late - early
+    centre = sum(values) / len(values)
+    spread = (sum((v - centre) ** 2 for v in values) / (len(values) - 1)) ** 0.5
+    if abs(shift) <= spread:
+        return None  # indistinguishable from the window's own scatter
+    return shift / (len(values) - half)
 
 
 def main(argv=None) -> int:

@@ -555,23 +555,45 @@ authoritative regardless of how a process titles itself.
 The preflight gate did its job here: it refused to start a run that would have hit
 OOM, rather than letting it fail 40 minutes in.
 
-## 14. Revised timing: the formal run is about half the estimate
+## 14. Timing, and why the formal run's responses start shorter
 
-The smoke measured 462-595 s per step. The formal run measures **212 s per step**,
-so 250 rollouts is roughly **14.7 hours**, not the 30 the plan budgeted.
+The smoke measured 462-595 s per step. The formal run's *first* step measured
+212 s, which this section originally extrapolated to 14.7 hours. One step is not a
+rate: over 102 rollouts the mean is **319 s**, so 250 rollouts is about **22
+hours**. Step time tracks response length, so it drifts rather than holding a
+constant.
 
-The cause is the shared `sigma0`. The smoke self-calibrated to 6.7349; the formal
-run uses the 3.0323 agreed with the sibling arms. The soft length window is
-expressed in units of `sigma0`, so halving it roughly doubles the length penalty,
-and mean response length fell from 627 tokens to 293. Every stage that scales with
-response length -- generation, both log-probability forwards, and the actor update
--- shrank with it. Peak actor memory fell too, from 38.6 GiB to 34.7 GiB.
+### The shorter responses are the SFT adapter, not `sigma0`
 
-This is a real behavioural difference between the arms, not just a speedup: the
-formal run is training on visibly shorter responses than the smoke did. It is the
-intended configuration, since the shared `sigma0` is what makes the arms
-comparable, but the length distribution should be reported alongside the reward
-curve rather than left implicit.
+This section first blamed the drop from 627 to 293 mean tokens on the shared
+`sigma0` (3.0323 here against the smoke's self-calibrated 6.7349), reasoning that a
+smaller `sigma0` narrows the soft length window and so penalises length harder.
+That was wrong, and the logged metrics say so:
+
+| | smoke10 | formal250 |
+|---|---|---|
+| actor | bare `Qwen3-14B-Base` | base + SFT adapter |
+| `sigma0` | 6.7349 | 3.0323 |
+| step-1 mean tokens | 631 | 293 |
+| step-1 truncated | 5/64 | 0/64 |
+| step-1 entropy | 1.10 | 0.94 |
+| step-1 shaping penalty | -1.80 | -0.01 |
+
+The decisive column is step 1. No gradient from the shaping has been applied yet,
+so step-1 length is a property of the sampling policy alone -- 631 against 293 is
+the adapter, not the reward. Truncation agrees: the bare base model hit the
+2048-token cap on 5-7 of every 64 responses because it does not reliably emit EOS,
+while the adapter-initialised actor truncates nothing. Entropy agrees too.
+
+And `sigma0` is barely active here. The shaping penalty
+(`reward_mean - raw_reward_mean`) is -0.01 to -0.07 in the formal run against -1.0
+to -2.3 in the smoke. The causality was backwards: responses are short enough to
+sit *inside* the length window, so they are not penalised.
+
+Length does not stay at 293 either. Under training it rises into a 390-470 token
+band by rollouts 40-100, with a within-window standard deviation around 108 tokens.
+That spread is why per-step timing moves, and why a short-window slope over length
+or entropy is not evidence of a trend (see section 15).
 
 ### Restart history for this run
 
@@ -586,3 +608,45 @@ Three launches, of which only the third is the run of record:
 
 The archived attempt's metrics are kept under `runs/_archive/` and
 `reports/_archive/` for comparison, with its adapter snapshots deleted.
+
+## 15. The health checker's trend alarms fired against the data
+
+Over the first 102 rollouts the checker reported 26 `PROBLEM` lines. Twenty-four
+of them were wrong, and wrong in the specific sense that the quantity they named
+was moving the *other* way:
+
+| alarm | times | what the data did |
+|---|---|---|
+| `mean_response_tokens falling` | 12 | rose: 365 mean over rollouts 1-51, 396 over 52-102 |
+| `response_entropy collapsing` | 12 | flat: 0.693 -> 0.669 across the same halves |
+| real faults | 2 | both at rollout 2, before the fixes in this section landed |
+
+The cause is scale, not sign. Mean response length carries a within-window
+standard deviation of about 108 tokens on a mean of 396, so the difference between
+the first and last point of any short window is dominated by sampling noise. A
+five-point slope over a quantity that noisy will report a "trend" in whichever
+direction the endpoints happen to fall, roughly half the time each. Raising the
+minimum from two points to five (section 9's fix) reduced the rate but could not
+fix the statistic: the endpoints still decide the verdict.
+
+What the checker is for is catching a lost run early -- OOM, NaN, a dead process, a
+degenerate sampler. An alarm that fires on a quarter of all steps while the run is
+healthy actively works against that, because the one line that matters scrolls past
+among the ones that do not. Two changes:
+
+* Judge a trend by comparing the mean of the window's first half against its
+  second half, not by its endpoints, and require the shift to exceed the window's
+  own standard deviation. That is a signal-to-noise test rather than a slope, so a
+  108-token wobble cannot clear it while a genuine collapse can.
+* Require a longer window (10 rollouts) before either alarm is eligible at all.
+
+`tests/p2t/test_run_health.py` pins both directions: two noisy rollouts must stay
+silent, and a sustained eight-step decline must still be caught.
+
+### Truncation is worth watching, length alone is not
+
+For a run initialised from the SFT adapter the informative length signal is
+`truncated_responses`, not the mean. Over 6,528 responses in the first 102
+rollouts exactly 2 hit the 2,048-token cap. The bare base model truncated 5-7 of
+every 64. A rise in truncation would mean the actor is learning to run past the
+cap, which is a real failure; a 50-token drift in the mean is not.
