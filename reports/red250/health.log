@@ -37,3 +37,20 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /ho
 rollout 9: raw_reward 8.94439697265625, loss -8.328750835033134, grad_norm 2.035944700241089, tokens 355.390625, token_reward_abs_mean 1.546937108039856, flip 0.00677071837708354
   note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0068); see RED_REPRO_NOTES 2.6
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0010.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 10: raw_reward 5.629156112670898, loss -5.201981335761957, grad_norm 2.1324257850646973, tokens 236.9375, token_reward_abs_mean 1.478297233581543, flip 0.04550250619649887
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0011.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 11: raw_reward 5.8658447265625, loss -4.213888378930278, grad_norm 8.663240432739258, tokens 216.578125, token_reward_abs_mean 1.505233883857727, flip 0.022004185244441032
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0012.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 12: raw_reward 4.06341552734375, loss -3.345815904904157, grad_norm 2.7018792629241943, tokens 163.71875, token_reward_abs_mean 1.6513947248458862, flip 0.048959724605083466
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0013.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 13: raw_reward 8.929443359375, loss -8.240235970704816, grad_norm 2.7178030014038086, tokens 283.0625, token_reward_abs_mean 1.4447721242904663, flip 0.0024287921842187643
+  note: RED barely changes the update direction vs plain RLOO (flip fraction 0.0024); see RED_REPRO_NOTES 2.6
+  PROBLEM: response length falling -73 tokens/rollout
