@@ -1365,3 +1365,143 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
 rollout 49: raw_reward 17.1256103515625, loss -1.7125358628109097, grad_norm 0.2299964874982834, tokens 581.734375, ESS/T 0.9993128776550293, varying/adv 2.558639425842557e-05
   note: attribution softmax flat (credit_ess_ratio 0.99931) -- expected, see notes 2.2
   ok
+--- step 50/250 at 2026-09-21T07:42:26+08:00 ---
+wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
+{
+  "run": "p2t250",
+  "rollouts": 50,
+  "raw_reward_first": 0.5495433807373047,
+  "raw_reward_last": 17.4041748046875,
+  "raw_reward_mean": 8.949956130981445,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9960508799552917,
+  "p2t_flat_response_fraction": 0.6778125,
+  "p2t_onehot_response_fraction": 0.0003125,
+  "p2t_bonus_over_advantage": 1.4891445857286454,
+  "p2t_varying_bonus_over_advantage": 4.01430026977323e-05,
+  "p2t_sign_flip_fraction": 0.25634456157684327,
+  "p2t_zero_attribution_share_mass": 0.01113508343230933,
+  "p2t_unmapped_share_mean": 0.003516222038306296,
+  "mean_response_tokens": 363.989375,
+  "elapsed_sec_total": 15894.357542095706,
+  "actor_peak_gb": 39.319358348846436,
+  "reward_peak_gb": 25.710930347442627,
+  "figure": "p2t250/reward.png"
+}
+rollout 50: raw_reward 17.4041748046875, loss -1.740675213324721, grad_norm 0.23884034156799316, tokens 580.25, ESS/T 0.9991683959960938, varying/adv 3.0022581995581277e-05
+  note: attribution softmax flat (credit_ess_ratio 0.99917) -- expected, see notes 2.2
+  ok
+--- step 51/250 at 2026-09-21T07:47:29+08:00 ---
+wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
+{
+  "run": "p2t250",
+  "rollouts": 51,
+  "raw_reward_first": 0.5495433807373047,
+  "raw_reward_last": 9.764602661132812,
+  "raw_reward_mean": 8.965929592356963,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9960833530800015,
+  "p2t_flat_response_fraction": 0.6795343137254902,
+  "p2t_onehot_response_fraction": 0.00030637254901960784,
+  "p2t_bonus_over_advantage": 1.4885659247052436,
+  "p2t_varying_bonus_over_advantage": 3.979298825844821e-05,
+  "p2t_sign_flip_fraction": 0.25618218206891824,
+  "p2t_zero_attribution_share_mass": 0.010995298811216272,
+  "p2t_unmapped_share_mean": 0.0034958859722988276,
+  "mean_response_tokens": 364.76164215686276,
+  "elapsed_sec_total": 16169.664718175773,
+  "actor_peak_gb": 39.319358348846436,
+  "reward_peak_gb": 25.710930347442627,
+  "figure": "p2t250/reward.png"
+}
+rollout 51: raw_reward 9.764602661132812, loss -0.97474120521656, grad_norm 0.2246079444885254, tokens 403.375, ESS/T 0.9977070093154907, varying/adv 2.2292266294243746e-05
+  note: attribution softmax flat (credit_ess_ratio 0.99771) -- expected, see notes 2.2
+  ok
+--- step 52/250 at 2026-09-21T07:55:02+08:00 ---
+wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
+{
+  "run": "p2t250",
+  "rollouts": 52,
+  "raw_reward_first": 0.5495433807373047,
+  "raw_reward_last": 10.79541015625,
+  "raw_reward_mean": 9.001111910893368,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9961161361290858,
+  "p2t_flat_response_fraction": 0.6820913461538461,
+  "p2t_onehot_response_fraction": 0.00030048076923076925,
+  "p2t_bonus_over_advantage": 1.493052217249687,
+  "p2t_varying_bonus_over_advantage": 3.943924065634537e-05,
+  "p2t_sign_flip_fraction": 0.2580122019235904,
+  "p2t_zero_attribution_share_mass": 0.01084367280306581,
+  "p2t_unmapped_share_mean": 0.0034691541894482304,
+  "mean_response_tokens": 367.7352764423077,
+  "elapsed_sec_total": 16649.612168754684,
+  "actor_peak_gb": 39.319358348846436,
+  "reward_peak_gb": 25.710930347442627,
+  "figure": "p2t250/reward.png"
+}
+rollout 52: raw_reward 10.79541015625, loss -1.0787919427166344, grad_norm 0.16612178087234497, tokens 519.390625, ESS/T 0.9977880716323853, varying/adv 2.1398112949100323e-05
+  note: attribution softmax flat (credit_ess_ratio 0.99779) -- expected, see notes 2.2
+  ok
+--- step 53/250 at 2026-09-21T08:00:35+08:00 ---
+wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
+{
+  "run": "p2t250",
+  "rollouts": 53,
+  "raw_reward_first": 0.5495433807373047,
+  "raw_reward_last": 9.804458618164062,
+  "raw_reward_mean": 9.01626939593621,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9961808042706184,
+  "p2t_flat_response_fraction": 0.6869103773584906,
+  "p2t_onehot_response_fraction": 0.00029481132075471697,
+  "p2t_bonus_over_advantage": 1.5009110496853881,
+  "p2t_varying_bonus_over_advantage": 3.9072651455875154e-05,
+  "p2t_sign_flip_fraction": 0.2572730012097449,
+  "p2t_zero_attribution_share_mass": 0.010703347961611624,
+  "p2t_unmapped_share_mean": 0.0034463582780071586,
+  "mean_response_tokens": 369.4027122641509,
+  "elapsed_sec_total": 16956.54399953573,
+  "actor_peak_gb": 39.319358348846436,
+  "reward_peak_gb": 25.710930347442627,
+  "figure": "p2t250/reward.png"
+}
+rollout 53: raw_reward 9.804458618164062, loss -0.9791965035255998, grad_norm 0.18126969039440155, tokens 456.109375, ESS/T 0.9995435476303101, varying/adv 2.0010013031424023e-05
+  note: attribution softmax flat (credit_ess_ratio 0.99954) -- expected, see notes 2.2
+  ok
+--- step 54/250 at 2026-09-21T08:05:08+08:00 ---
+wrote /home/ml-user/workdir/project-1/baseline/reports/p2t250/reward.png
+{
+  "run": "p2t250",
+  "rollouts": 54,
+  "raw_reward_first": 0.5495433807373047,
+  "raw_reward_last": 17.21923828125,
+  "raw_reward_mean": 9.168176227145725,
+  "sigma0": 3.0323000897825447,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.996225772080598,
+  "p2t_flat_response_fraction": 0.6877893518518519,
+  "p2t_onehot_response_fraction": 0.00028935185185185184,
+  "p2t_bonus_over_advantage": 1.5217198602579258,
+  "p2t_varying_bonus_over_advantage": 3.911797860685814e-05,
+  "p2t_sign_flip_fraction": 0.26048965834909016,
+  "p2t_zero_attribution_share_mass": 0.010615133529494482,
+  "p2t_unmapped_share_mean": 0.003421442518528137,
+  "mean_response_tokens": 371.65190972222223,
+  "elapsed_sec_total": 17239.116225579754,
+  "actor_peak_gb": 39.319358348846436,
+  "reward_peak_gb": 25.710930347442627,
+  "figure": "p2t250/reward.png"
+}
+rollout 54: raw_reward 17.21923828125, loss -1.7232987380994018, grad_norm 0.29848846793174744, tokens 490.859375, ESS/T 0.9986090660095215, varying/adv 4.152031760895625e-05
+  note: attribution softmax flat (credit_ess_ratio 0.99861) -- expected, see notes 2.2
+  ok
