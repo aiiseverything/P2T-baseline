@@ -1,0 +1,18 @@
+{
+  "run": "red250",
+  "rollouts": 1,
+  "raw_reward_first": 0.48187255859375,
+  "raw_reward_last": 0.48187255859375,
+  "raw_reward_mean": 0.48187255859375,
+  "beta_c": 1.0,
+  "advantage_rule": "loo_scalar_baseline_r3",
+  "redistribution_protocol": "prefix_difference_eq6",
+  "credit_ess_ratio": 0.2864946126937866,
+  "advantage_flip_fraction": 0.13967172801494598,
+  "mean_response_tokens": 302.71875,
+  "kl_to_init_last": 0.0,
+  "sigma0": 3.0323000897825447,
+  "actor_peak_gb": 34.71906661987305,
+  "reward_peak_gb": 14.207903385162354,
+  "figure": "red250/reward.png"
+}

@@ -1,0 +1,5 @@
+=== watcher started 2026-09-21T20:02:49+08:00 for red250 (every 30s) ===
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0001.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 1: raw_reward 0.48187255859375, loss -0.6740040313452482, grad_norm 1.967657208442688, tokens 302.71875, token_reward_abs_mean 1.6490411758422852, flip 0.13967172801494598
+  ok
