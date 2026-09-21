@@ -78,3 +78,17 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0019.pn
 wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
 rollout 19: raw_reward 7.030193328857422, loss -7.677280838979641, grad_norm 1.2580174207687378, tokens 519.421875, token_reward_abs_mean 1.417325735092163, flip 0.05474836751818657
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0020.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 20: raw_reward 2.31829833984375, loss -1.1260087340488099, grad_norm 0.922584056854248, tokens 582.421875, token_reward_abs_mean 1.2906482219696045, flip 0.07664654403924942
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0021.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 21: raw_reward 6.15509033203125, loss -5.862228605430573, grad_norm 1.4292070865631104, tokens 875.375, token_reward_abs_mean 1.4044771194458008, flip 0.10002856701612473
+  note: redistributed credit is very flat (mean max share 0.0194)
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0022.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 22: raw_reward 1.2939529418945312, loss 2.9480851449188776, grad_norm 0.9546858668327332, tokens 925.453125, token_reward_abs_mean 1.2350807189941406, flip 0.1836431473493576
+  note: redistributed credit is very flat (mean max share 0.0186)
+  ok
