@@ -1,0 +1,17 @@
+=== watcher started 2026-09-22T11:32:28+08:00 for red250b (every 30s) ===
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/steps/step-0001.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+rollout 1: raw_reward 0.43017578125, loss -0.4079873743467033, grad_norm 3.348410129547119, tokens 319.09375, token_reward_abs_mean 1.649685025215149, flip 0.16413672268390656, pushed-up 0.5331994891166687, bonus/advantage 0.511935293674469
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/steps/step-0002.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+rollout 2: raw_reward 3.979269027709961, loss 0.0738200101768598, grad_norm 2.438676118850708, tokens 191.71875, token_reward_abs_mean 2.234693765640259, flip 0.20488998293876648, pushed-up 0.5289323925971985, bonus/advantage 0.917054295539856
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/steps/step-0003.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+rollout 3: raw_reward 4.34771728515625, loss -0.10941103659570217, grad_norm 1.4976255893707275, tokens 260.546875, token_reward_abs_mean 1.534359097480774, flip 0.1252773553133011, pushed-up 0.5300149917602539, bonus/advantage 0.47280800342559814
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/steps/step-0004.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250b/summary.json
+rollout 4: raw_reward 5.860015869140625, loss -0.10835566953755915, grad_norm 3.5298848152160645, tokens 257.46875, token_reward_abs_mean 1.6626015901565552, flip 0.17896589636802673, pushed-up 0.5247603058815002, bonus/advantage 0.6486073732376099
+  ok

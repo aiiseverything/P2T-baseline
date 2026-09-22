@@ -1,0 +1,23 @@
+{
+  "run": "smoke10",
+  "rollouts": 6,
+  "raw_reward_first": -4.039520263671875,
+  "raw_reward_last": 0.2903900146484375,
+  "raw_reward_mean": -1.0550244649251301,
+  "sigma0": 8.071861869735475,
+  "alpha": 0.1,
+  "omega": 0.6,
+  "credit_ess_ratio": 0.9984206259250641,
+  "p2t_flat_response_fraction": 0.7942708333333334,
+  "p2t_onehot_response_fraction": 0.0,
+  "p2t_bonus_over_advantage": 0.8805704315503439,
+  "p2t_varying_bonus_over_advantage": 1.0834558603770953e-05,
+  "p2t_sign_flip_fraction": 0.10510355109969775,
+  "p2t_zero_attribution_share_mass": 0.021808242580542963,
+  "p2t_unmapped_share_mean": 0.0339553517405875,
+  "mean_response_tokens": 788.9453125,
+  "elapsed_sec_total": 3196.0155901241815,
+  "actor_peak_gb": 38.58803987503052,
+  "reward_peak_gb": 29.071491718292236,
+  "figure": "smoke10/reward.png"
+}
