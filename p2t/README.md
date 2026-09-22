@@ -78,3 +78,65 @@ reports how large the token term is relative to the sequence advantage.
 See [P2T_REPRO_NOTES.md](P2T_REPRO_NOTES.md) for the equation-to-code map, the
 three places where the paper contradicts itself, and what was deliberately left
 unfixed.
+
+## Evaluation
+
+The four paper metrics for this arm are produced by the **`niuniu` evaluation
+workflow**, which is a separate branch of the VPO-RM repository. It is *not* the
+`runs/*-canonical-20260917` suites checked in here, and the two must not be mixed
+— see "Why not the old suites" below.
+
+- **Where**: branch `niuniu`, pinned revision `c8abb02` ("Support two-GPU credit
+  ablations and publish four-metric evaluation workflow"), checked out at
+  `../niuniu-ref`. Its `docs/evaluation.md` is the authority for the protocol;
+  do not restate it from memory.
+- **What it produces**, one `metric_summary.json` per metric:
+
+  | metric | reported field | protocol |
+  |---|---|---|
+  | RM-Reward | `mean` | frozen 256 UltraFeedback prompts, seed 42, T=1, top_p=1, 2048 tokens; raw Skywork scalar, **no** length or KL penalty |
+  | AlpacaEval | `weighted_win_rate_pct` | 805 prompts, GPT-4.1 judge against GPT-4 Turbo references; **not** official length-controlled |
+  | IFEval | `project_four_metric_mean_pct` | 541 prompts / 834 instructions, generation seeds 42–46, official checker at seed 42 |
+  | Arena-Hard | `arena_hard_style_pct` | 750 questions (500 hard + 250 creative), GPT-4o judge against the `gpt-4o-mini-2024-07-18` reference |
+
+**Why not the old suites.** They are a different protocol, not an earlier version
+of this one: their Arena-Hard run uses **500 hard prompts only**, an
+`o3-mini-2025-01-31` reference and a **GPT-4.1** judge, i.e. three of the four
+inputs differ from the workflow above, and their repeated-seed counts differ too.
+Their centres therefore are not comparable with the numbers this workflow
+produces, and `docs/evaluation.md` §6 warns against presenting new-protocol
+results as a reproduction of them. This arm has **never** been evaluated, so it
+has no old-protocol number to be confused with in the first place.
+
+**Run it** (`../niuniu-ref/LOCAL-DEVIATION-L20.md` records the two environment
+adaptations this host needs, including why `VLLM_USE_FLASHINFER_SAMPLER=0` is
+required — without it the engine cannot start on this box's CUDA 12.2):
+
+```bash
+cd ../niuniu-ref
+source ../baseline/.venv/bin/activate
+export CUDA_VISIBLE_DEVICES=0,1            # two free cards; the RM takes the second
+export VLLM_USE_FLASHINFER_SAMPLER=0
+python scripts/run_benchmarks.py --config configs/evaluation/qwen3-14b-base.json \
+  --stage generate --metric all \
+  --model "$PWD/models/Qwen3-14B-Base" --tokenizer "$PWD/models/Qwen3-14B-Base" \
+  --rm "$PWD/models/Skywork-Reward-V2-Qwen3-8B" \
+  --tag p2t --adapter "$PWD/runs/p2t250/checkpoint-250" \
+  --output "$PWD/runs/eval-qwen3-14b-base"
+# then --stage judge (paid; --budget-cny is per judge invocation, not a total),
+# then --stage score, which is what writes the metric_summary.json files
+```
+
+The run records what it actually did: each metric writes a `manifest_*.json`
+holding the sampling recipe, seed, dataset path and that dataset's SHA256, and
+the output root holds the resolved `benchmark_config.json`. Check those rather
+than trusting a label.
+
+**Arena-Hard's style control is fitted across the candidate set**, so a single
+model summarised alone is distorted. Once the sibling arms have generations too,
+summarise them together:
+
+```bash
+python scripts/summarize_benchmarks.py --config configs/evaluation/qwen3-14b-base.json \
+  --metric arena_hard --output runs/eval-qwen3-14b-base --tags p2t base sft grpo vpo
+```

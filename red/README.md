@@ -93,3 +93,49 @@ tensor parallelism. See `RED_REPRO_NOTES.md` §7 for the device layout and the
 memory budget, and change `vllm_gpus` / `vllm_tensor_parallel_size` together —
 `tests/red/test_trainer.py` and the trainer's own startup check will reject a
 mismatch.
+
+## Evaluation
+
+Evaluate this arm with the **`niuniu` four-metric workflow**, which is a separate
+branch of the VPO-RM repository at `../niuniu-ref` (pinned revision `c8abb02`).
+Its `docs/evaluation.md` is the authority; do not restate the protocol from
+memory, and do not reach for the `runs/*-canonical-20260917` suites checked in
+here — those are a *different* protocol, not an earlier version of this one.
+**Why**, concretely: their Arena-Hard run uses 500 hard prompts only, an
+`o3-mini-2025-01-31` reference and a GPT-4.1 judge, so three of that metric's four
+inputs differ from the workflow's 750 questions / `gpt-4o-mini-2024-07-18`
+reference / GPT-4o judge, and their repeated-seed counts differ as well.
+`docs/evaluation.md` §6 warns against presenting new-protocol results as a
+reproduction of those centres. No RED arm has ever been evaluated, so there is no
+old-protocol RED number to confuse this with.
+
+The four metrics and their reported fields: RM-Reward `mean` (raw Skywork scalar,
+no length or KL penalty), AlpacaEval `weighted_win_rate_pct` (GPT-4.1 judge
+against GPT-4 Turbo references; not length-controlled), IFEval
+`project_four_metric_mean_pct` (541 prompts / 834 instructions, generation seeds
+42–46), Arena-Hard `arena_hard_style_pct` (750 questions, GPT-4o judge).
+
+```bash
+cd ../niuniu-ref
+source ../baseline/.venv/bin/activate
+export CUDA_VISIBLE_DEVICES=0,1            # two free cards; the RM takes the second
+export VLLM_USE_FLASHINFER_SAMPLER=0       # required on this box, see LOCAL-DEVIATION-L20.md
+python scripts/run_benchmarks.py --config configs/evaluation/qwen3-14b-base.json \
+  --stage generate --metric all \
+  --model "$PWD/models/Qwen3-14B-Base" --tokenizer "$PWD/models/Qwen3-14B-Base" \
+  --rm "$PWD/models/Skywork-Reward-V2-Qwen3-8B" \
+  --tag red --adapter "$PWD/runs/red250b/checkpoint-250" \
+  --output "$PWD/runs/eval-qwen3-14b-base"
+# then --stage judge (paid; --budget-cny is per judge invocation), then --stage score
+```
+
+`--adapter` needs the final checkpoint, so this waits on `red250b` reaching step
+250. **Record which rule the checkpoint ran under**: `run_manifest.json` in the
+checkpoint directory stamps `red_advantage_rule` and `red_alpha`, and the credit
+rule changed materially between `red250` (R3, retired) and `red250b` (R4) — a
+number without that stamp does not say which estimator produced it. See
+`RED_REPRO_NOTES.md` §2.2.
+
+Arena-Hard's style control is fitted across the candidate set, so summarise the
+arms together once they all have generations: `summarize_benchmarks.py --metric
+arena_hard --output runs/eval-qwen3-14b-base --tags red base sft grpo vpo p2t`.
