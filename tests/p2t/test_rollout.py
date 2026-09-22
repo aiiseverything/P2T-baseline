@@ -12,12 +12,18 @@ from p2t.rollout import select_training_rollout, validate_response_termination
 GROUP, WIDTH, PAD = 2, 5, 0
 
 
-def _rollout(prompt_count, length, reason, degenerate=False):
-    """A rollout tuple for ``prompt_count`` groups; every row the same shape."""
+def _rollout(prompt_count, length, reason, degenerate=False, block=WIDTH):
+    """A rollout tuple for ``prompt_count`` groups; every row the same shape.
+
+    ``block`` is the response block's padded width, i.e. the batch's longest
+    response.  It is normally ``WIDTH``, but a batch whose responses all collapsed
+    to a couple of tokens produces a correspondingly narrow block, and that is the
+    case the resample path has to survive.
+    """
     count = prompt_count * GROUP
-    responses = torch.full((count, WIDTH), PAD, dtype=torch.long)
-    mask = torch.zeros((count, WIDTH), dtype=torch.long)
-    logprobs = torch.zeros((count, WIDTH))
+    responses = torch.full((count, block), PAD, dtype=torch.long)
+    mask = torch.zeros((count, block), dtype=torch.long)
+    logprobs = torch.zeros((count, block))
     for index in range(count):
         # Values start above the stop id so the terminal marker is the only one.
         responses[index, :length] = torch.arange(3, length + 3)
@@ -150,6 +156,52 @@ def test_pieces_of_different_widths_merge_into_one_batch():
     torch.testing.assert_close(lengths[GROUP:], torch.full((GROUP,), 5))   # group a, retry
     # The narrow rows must be zero-padded, not left holding stale tokens.
     torch.testing.assert_close(result[3][:GROUP, 2:], torch.zeros(GROUP, 3, dtype=torch.long))
+
+
+def test_a_narrow_response_block_merged_with_a_wider_piece_is_padded_not_sliced():
+    """The piece's *block* width, not its row lengths, is what has to fit.
+
+    ``test_pieces_of_different_widths_merge_into_one_batch`` varies the valid
+    lengths but both pieces keep a five-column block, so the merge never has to
+    pad a piece whose own block is narrower than the merged width.  A collapsing
+    policy does produce such a piece -- a batch of two-token responses is two
+    columns wide -- and then ``_pack`` used to index a two-column slice against a
+    five-column ``keep`` mask and raise
+
+        The size of tensor a (2) must match the size of tensor b (5)
+
+    This arm shares ``_pack`` with the RED arm verbatim; the bug fired on that
+    arm's red250 run at rollout 68.  It is latent here, not absent.
+    """
+    calls = []
+
+    def rollout_fn(prompts):
+        calls.append(len(prompts))
+        # pass 1 collapsed to a two-column block; the retry did not
+        return _rollout(len(prompts), 2 if len(calls) == 1 else WIDTH, "stop",
+                        block=2 if len(calls) == 1 else WIDTH)
+
+    def flag_degenerate(responses, mask):
+        rows = responses.shape[0]
+        empty = torch.zeros(rows, dtype=torch.bool)
+        if len(calls) == 1:
+            empty[:GROUP] = True
+        return empty, torch.zeros(rows, dtype=torch.bool)
+
+    result, _, _ = select_training_rollout(
+        rollout_fn, ["a", "b"], group_size=GROUP, pad_token_id=PAD,
+        flag_degenerate=flag_degenerate, device=torch.device("cpu"),
+        stop_token_ids=(2,), max_response_tokens=WIDTH)
+    assert calls == [2, 1]
+    assert result is not None, "the merged batch must survive"
+    assert result[3].shape[1] == WIDTH, "re-padded to the wider piece"
+    assert result[4].shape == result[3].shape, "the mask travels with the responses"
+    lengths = result[4].sum(-1)
+    torch.testing.assert_close(lengths[:GROUP], torch.full((GROUP,), 2))          # pass 1
+    torch.testing.assert_close(lengths[GROUP:], torch.full((GROUP,), WIDTH))      # retry
+    # The narrow rows are zero-padded, so no stale token sits past the mask.
+    torch.testing.assert_close(result[3][:GROUP, 2:], torch.zeros(GROUP, WIDTH - 2,
+                                                                 dtype=torch.long))
 
 
 def test_retry_batch_with_a_narrower_prompt_block_still_merges():

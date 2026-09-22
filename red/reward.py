@@ -11,16 +11,18 @@ The pipeline, in the order the trainer runs it:
     Eq. (6)   r~_t = R_phi(x, y_<=t) - R_phi(x, y_<=t-1)      prefix difference
     Eq. (7)   r^_t = beta_c * r~_t + (1 - beta_c) * r_t       convex combination
     Eq. (8)   r^final_t = r^_t - beta * r^KL_t                KL folded in
-    R3        A_{i,t} = r^final_{i,t} - b_i                   leave-one-out scalar
+    R4        A_{i,t} = A_seq_i + alpha * (r^final_{i,t} - mean_t r^final_{i,t})
 
 Eq. (8) puts the KL *inside* the reward, so the trainer carries no separate KL
 loss term and the credit step must run after the reference log-probs are
 available.  Both departures are recorded, not hidden.
 
 The advantage rule is the one place the paper is silent: it gives a full PPO
-recipe but no RLOO details at all.  See ``RED_REPRO_NOTES.md`` 2.2 for why the
-two obvious readings of the RLOO baseline are either degenerate or unfaithful,
-and why R3 is the one that keeps RLOO's own estimator intact.
+recipe but no RLOO details at all, and its PPO recipe leaves the critic's
+architecture, the optimiser, the inner-epoch count and the target values all
+unspecified.  See ``RED_REPRO_NOTES.md`` 2.2 for why the two obvious readings of
+the RLOO baseline are either degenerate or unfaithful, and for why R3 -- the
+first rule this arm chose -- had to be retired in favour of R4.
 """
 
 from __future__ import annotations
@@ -32,9 +34,24 @@ import torch
 from torch import Tensor
 
 # Stamped into every metric row, checkpoint manifest and credit dump so an
-# artifact can never be read as a different redistribution rule.
+# artifact can never be read as a different redistribution rule.  The advantage
+# rule is stamped separately from the protocol because Eq. (6)-(8) survive a
+# change of rule untouched -- ``red250`` carries the retired rule's stamp, so no
+# artifact from it can be mistaken for this one.
 RED_PROTOCOL = "prefix_difference_eq6"
-RLOO_ADVANTAGE_RULE = "loo_scalar_baseline_r3"
+RLOO_ADVANTAGE_RULE = "r4_seq_advantage_plus_centered_credit"
+
+# The retired rule.  Kept as a named constant so the checker and the readers can
+# recognise it and refuse it, rather than treating it as an unknown string.
+RETIRED_RLOO_ADVANTAGE_RULE = "loo_scalar_baseline_r3"
+
+# R4's weight on the redistributed term.  One, not a tuned constant: it gives
+# RLOO's sequence contrast and RED's redistribution equal weight, which is the
+# only a-priori defensible choice when the paper specifies neither.  Measured on
+# the red250 dumps, the centred token term has std ~1.4-2.0 against |A_seq| ~2.3-2.8,
+# so one puts the two terms within a factor of ~1.5 of each other -- the same
+# order the sibling P2T arm runs at.
+RED_ALPHA_DEFAULT = 1.0
 
 # The paper's default.  beta_c = 1 removes the sparse sequence term entirely
 # (Eq. 7), leaving the pure redistributed reward; Table 7 uses 1 everywhere
@@ -265,12 +282,12 @@ class Credit:
     """The tensor bundle the trainer's loss and diagnostics consume.
 
     ``advantage`` is the only field the policy loss reads.  ``direction`` is the
-    token-only part of it -- ``advantage == direction - b_i``, i.e. the R3
-    baseline is the per-response constant that separates the two -- and
-    ``weight`` is the positive-credit share rescaled so its valid-token mean is
-    one, which is what makes the credit-concentration diagnostics comparable
-    across response lengths and across arms.  ``tau_used`` exists only for
-    interface parity with the VPO-RM arms and is always ``None`` here.
+    token-only part of it -- ``advantage == sequence_advantage + direction``, the
+    invariant every other arm in this project keeps -- and ``weight`` is the
+    positive-credit share rescaled so its valid-token mean is one, which is what
+    makes the credit-concentration diagnostics comparable across response lengths
+    and across arms.  ``tau_used`` exists only for interface parity with the
+    VPO-RM arms and is always ``None`` here.
     """
 
     advantage: Tensor          # [B, T] A_{i,t}, the tensor the loss reads
@@ -301,35 +318,66 @@ def credit_share(final_reward: Tensor, response_mask: Tensor) -> Tensor:
     return share.masked_fill(~mask, 0.0)
 
 
-def rloo_red_credit(final_reward: Tensor, baseline: Tensor,
-                    response_mask: Tensor) -> Credit:
-    """R3: ``A_{i,t} = r^final_{i,t} - b_i`` (``RED_REPRO_NOTES.md`` 2.2).
+def rloo_red_credit(final_reward: Tensor, sequence_advantage: Tensor,
+                    response_mask: Tensor, *,
+                    alpha: float = RED_ALPHA_DEFAULT) -> Credit:
+    """R4: ``A_{i,t} = A_seq_i + alpha * (r^final_{i,t} - mean_t r^final_{i,t})``.
 
-    The baseline is RLOO's leave-one-out sequence mean.  Subtracting one scalar
-    per response splits the per-token advantage into RLOO's sequence-level term
-    and RED's redistribution, which is what makes this an RLOO-RED arm rather
-    than a new algorithm: replacing the sequence return with RED's return instead
-    would cancel the dynamic-initialisation offset inside the leave-one-out mean
-    and reproduce plain RLOO exactly.
+    ``sequence_advantage`` is RLOO's own leave-one-out advantage,
+    ``returns - baseline``, one scalar per response.  The second term is RED's
+    redistribution, centred within the response so it carries no response-level
+    level of its own.  Three properties follow, and all three are load-bearing:
 
-    Note that a token the reward model never saw still receives a *non-zero*
-    advantage: its redistributed reward is zero by construction, but the baseline
-    (and the KL term inside ``r^final``) is not, so ``A = -b_i - beta*KL``.  That
-    follows from the R3 rule as specified and is not an oversight -- only the
-    redistribution itself is zero there.
+    * ``advantage == sequence_advantage + direction`` -- the invariant every
+      other arm in this project keeps, which R3 had inverted.
+    * the valid-token mean of ``direction`` is zero (to float32 rounding of the
+      per-response mean), so the valid-token mean of ``A`` is exactly
+      ``A_seq``.  RLOO's sequence contrast survives at full strength and RED only
+      decides *which tokens* within a response receive it.
+    * no term of the advantage is a sequence-scale constant carried on every
+      token, which is what makes the failure mode below impossible.
+
+    **Why R3 was retired.**  R3 was ``A_{i,t} = r^final_{i,t} - b_i`` with ``b_i``
+    RLOO's leave-one-out *sequence* mean.  That subtracts a sequence-scale
+    quantity from a token-scale reward, so the advantage is dominated by the
+    constant ``-b_i`` whenever the group's rewards are large relative to a single
+    token's share of them.  On the ``red250`` dumps at rollout 26, with group
+    rewards negative, ``b_i = -15.67`` and the advantage was ``+15.66`` on average
+    with a within-response spread of only 8% of that -- ``100%`` of tokens had a
+    *positive* advantage.  The update then stops being contrastive and becomes
+    "raise the probability of every token sampled", which is the entropy collapse
+    and the degenerate 2-token end state that run reached.  The arm's own
+    ``red_advantage_flip_fraction`` reported it: ``0.0000`` from rollout 26 on.
+    A secondary channel ran the same way: the loss divides the credit by the
+    response length but R3 did not divide the baseline, so lengthening a
+    negative-total response raised its mean advantage -- measured as
+    ``corr(len, sum_t r~) = -0.294`` against ``corr(len, mean_t A) = +0.281`` at
+    rollout 40.  Centring removes it, because a centred term has nothing for the
+    length to scale.  ``RED_REPRO_NOTES.md`` 2.2 records the full analysis.
+
+    A token the reward model never saw now receives ``A_seq_i - alpha*mean_t r^final``
+    rather than the old ``-b_i - beta*KL``: its redistributed reward is still zero
+    by construction, but it shares the response's sequence advantage instead of
+    the retired rule's constant.
     """
     mask = _binary_mask(response_mask)
     if final_reward.shape != mask.shape:
         raise ValueError("final_reward must be [B, T] matching response_mask")
-    if baseline.shape != (mask.shape[0],):
-        raise ValueError("baseline must be [B] matching response_mask")
-    if final_reward.device != baseline.device:
-        raise ValueError(f"final_reward is on {final_reward.device} but the baseline "
-                         f"is on {baseline.device}")
-    if not torch.isfinite(baseline).all():
-        raise ValueError("baseline must be finite")
-    advantage = (final_reward.float() - baseline.float()[:, None]).masked_fill(~mask, 0.0)
+    if sequence_advantage.shape != (mask.shape[0],):
+        raise ValueError("sequence_advantage must be [B] matching response_mask")
+    if final_reward.device != sequence_advantage.device:
+        raise ValueError(f"final_reward is on {final_reward.device} but the sequence "
+                         f"advantage is on {sequence_advantage.device}")
+    if not torch.isfinite(sequence_advantage).all():
+        raise ValueError("sequence_advantage must be finite")
+    if not math.isfinite(alpha) or alpha < 0.0:
+        raise ValueError("alpha must be finite and non-negative")
+
+    counts = mask.sum(-1, keepdim=True).float()
+    reward = final_reward.float().masked_fill(~mask, 0.0)
+    centered = reward - reward.sum(-1, keepdim=True) / counts
+    direction = (alpha * centered).masked_fill(~mask, 0.0)
+    advantage = (sequence_advantage.float()[:, None] + direction).masked_fill(~mask, 0.0)
     share = credit_share(final_reward, mask)
-    weight = (share * mask.sum(-1, keepdim=True).float()).masked_fill(~mask, 0.0)
-    return Credit(advantage=advantage, direction=final_reward.float().masked_fill(~mask, 0.0),
-                  weight=weight, tau_used=None)
+    weight = (share * counts).masked_fill(~mask, 0.0)
+    return Credit(advantage=advantage, direction=direction, weight=weight, tau_used=None)

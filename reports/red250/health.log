@@ -309,3 +309,13 @@ rollout 64: raw_reward -10.20654296875, loss 5.901346982253017, grad_norm 57.055
   PROBLEM: response length falling -27 tokens/rollout
   PROBLEM: entropy falling -1.7116 nats/rollout (collapse?)
   PROBLEM: KL to init is 5.19; the policy has drifted far
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0065.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 65: raw_reward -9.0537109375, loss 1.7098431318299845, grad_norm 65.35574340820312, tokens 2.0625, token_reward_abs_mean 4.942273139953613, flip 0.1666666716337204
+  PROBLEM: entropy falling -1.7377 nats/rollout (collapse?)
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/steps/step-0066.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/red250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/red250/summary.json
+rollout 66: raw_reward -10.56884765625, loss 7.374357396969572, grad_norm 90.61565399169922, tokens 2.515625, token_reward_abs_mean 4.052913188934326, flip 0.06832298636436462
+  PROBLEM: entropy falling -1.2825 nats/rollout (collapse?)
+  PROBLEM: KL to init is 6.13; the policy has drifted far
+=== train.pid is gone; watcher stopping 2026-09-22T04:00:39+08:00 ===

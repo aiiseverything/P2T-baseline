@@ -98,18 +98,26 @@ def _pack(rollout, indices, width: int, prompt_width: int, pad_token_id: int, de
     is **left**-padded to the batch-common ``prompt_width``: the actor tokenizer
     pads on the left, and a resampled batch holds fewer prompts so its own
     prompt block is narrower.  Without this the pieces cannot be concatenated.
+
+    ``width`` is the widest piece's need, so a piece whose own response block is
+    *narrower* than ``width`` must be padded up to it, not sliced to it: its rows
+    can only supply as many columns as the block holds, and a slice narrower than
+    ``keep`` is a shape error rather than a trim.  The pad tail lands outside
+    every row's mask, so the loss already ignores it.
     """
     input_ids, full_mask, positions, responses, response_mask, rendered, reasons, logprobs = rollout
     rows = torch.as_tensor(indices, device=device)
     selected = responses[rows]
     selected_mask = response_mask[rows]
-    keep = torch.arange(width, device=device)[None, :] < selected_mask[:, :width].sum(-1, keepdim=True)
-    packed_mask = (selected_mask[:, :width].bool() & keep).to(response_mask.dtype)
+    usable = min(width, responses.shape[1])
+    keep = torch.arange(usable, device=device)[None, :] < selected_mask[:, :usable].sum(-1, keepdim=True)
+    packed_mask = torch.zeros((len(indices), width), dtype=response_mask.dtype, device=device)
+    packed_mask[:, :usable] = (selected_mask[:, :usable].bool() & keep).to(response_mask.dtype)
     packed_responses = torch.full((len(indices), width), pad_token_id, dtype=responses.dtype,
                                   device=device)
-    packed_responses[:, :width] = selected[:, :width]
+    packed_responses[:, :usable] = selected[:, :usable]
     packed_logprobs = torch.zeros((len(indices), width), dtype=torch.float32, device=device)
-    packed_logprobs[:, :width] = logprobs[rows][:, :width]
+    packed_logprobs[:, :usable] = logprobs[rows][:, :usable]
 
     source_width = input_ids.shape[1] - responses.shape[1]
     if source_width > prompt_width:
@@ -171,6 +179,10 @@ def select_training_rollout(rollout_fn, prompts, *, group_size: int, pad_token_i
     width = max(_needed_width(source, indices) for source, indices, _ in pieces)
     # A retry batch holds fewer prompts, so its own chat padding is narrower;
     # every piece is left-padded to the widest prompt block before concatenation.
+    # Its response block is narrower too -- a resampled batch only spans the
+    # groups that failed, and those are short whenever the failure is length
+    # collapse -- so ``width`` can legitimately exceed a piece's own block and
+    # ``_pack`` pads that piece up to it rather than slicing past it.
     prompt_width = max(source[0].shape[1] - source[3].shape[1] for source, _, _ in pieces)
     packed = [_pack(source, indices, width, prompt_width, pad_token_id, device)
               for source, indices, _ in pieces]

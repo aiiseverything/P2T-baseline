@@ -8,14 +8,16 @@ leaves the RLOO baseline undefined, and for the four contradictions it records
 rather than repairs.
 """
 
-from .reward import (Credit, RED_BETA_C_DEFAULT, RED_PROTOCOL, RLOO_ADVANTAGE_RULE,
-                     credit_share, group_sigma, prefix_boundaries, prefix_token_rewards,
+from .reward import (Credit, RED_ALPHA_DEFAULT, RED_BETA_C_DEFAULT, RED_PROTOCOL,
+                     RETIRED_RLOO_ADVANTAGE_RULE, RLOO_ADVANTAGE_RULE, credit_share,
+                     group_sigma, prefix_boundaries, prefix_token_rewards,
                      red_convex_combination, red_final_reward, red_kl_reward,
                      rloo_baseline, rloo_red_credit, sequence_returns,
                      sequence_reward_at_eos)
 
 __all__ = [
-    "Credit", "RED_BETA_C_DEFAULT", "RED_PROTOCOL", "RLOO_ADVANTAGE_RULE",
+    "Credit", "RED_ALPHA_DEFAULT", "RED_BETA_C_DEFAULT", "RED_PROTOCOL",
+    "RETIRED_RLOO_ADVANTAGE_RULE", "RLOO_ADVANTAGE_RULE",
     "credit_share", "group_sigma", "prefix_boundaries", "prefix_token_rewards",
     "red_convex_combination", "red_final_reward", "red_kl_reward",
     "rloo_baseline", "rloo_red_credit", "sequence_returns",

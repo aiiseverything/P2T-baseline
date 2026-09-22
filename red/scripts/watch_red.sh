@@ -3,14 +3,21 @@
 # health check, appending everything to <report_dir>/health.log.
 #
 #   setsid nohup bash red/scripts/watch_red.sh red250 30 &
+#   setsid nohup bash red/scripts/watch_red.sh red250 30 stop-on-problem &
 #
 # Mirrors the sibling arm's watcher but drives the RED plotter and checker, and
 # lives here so a RED run never depends on a file the other arm owns.  Exits when
 # the run's pid file stops naming a live process.
+#
+# With ``stop-on-problem`` the watcher also SIGTERMs the run when the health check
+# finds a problem, so a collapse costs the rollouts it took to detect it rather
+# than the whole budget -- red250 ran 40 rollouts past its first hard signature.
+# Off by default because killing a run is the launcher's call, not the monitor's.
 set -uo pipefail
 
-RUN="${1:?usage: watch_red.sh <run-name> [interval-seconds]}"
+RUN="${1:?usage: watch_red.sh <run-name> [interval-seconds] [stop-on-problem]}"
 INTERVAL="${2:-30}"
+STOP_ON_PROBLEM="${3:-}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIG="$ROOT/configs/$RUN.json"
@@ -49,8 +56,13 @@ except FileNotFoundError:
     "$ROOT/.venv/bin/python" "$ROOT/red/scripts/plot_red.py" \
       --run "$REPORT" --out "$REPORT/steps/step-$padded.png" >> "$LOG" 2>&1
     "$ROOT/.venv/bin/python" "$ROOT/red/scripts/plot_red.py" --run "$REPORT" >> "$LOG" 2>&1
-    "$ROOT/.venv/bin/python" "$ROOT/red/scripts/check_red_health.py" \
-      --report "$REPORT" >> "$LOG" 2>&1
+    if [ "$STOP_ON_PROBLEM" = "stop-on-problem" ]; then
+      "$ROOT/.venv/bin/python" "$ROOT/red/scripts/check_red_health.py" \
+        --report "$REPORT" --stop-on-problem --pidfile "$PID_FILE" >> "$LOG" 2>&1
+    else
+      "$ROOT/.venv/bin/python" "$ROOT/red/scripts/check_red_health.py" \
+        --report "$REPORT" >> "$LOG" 2>&1
+    fi
   fi
   sleep "$INTERVAL"
 done

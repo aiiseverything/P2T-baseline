@@ -53,9 +53,10 @@ from .mapping import REWARD_INPUT_PROTOCOL, canonical_reward_input
 from .policy import (encode_prompts, render_chat_prompt, response_logits,
                      rollout_logp_microbatch, selected_logp_from_logits,
                      sampling_logits, stop_token_ids_for)
-from .reward import (RED_BETA_C_DEFAULT, RED_PROTOCOL, RLOO_ADVANTAGE_RULE,
-                     group_sigma, red_final_reward, red_kl_reward, rloo_baseline,
-                     rloo_red_credit, sequence_returns, sequence_reward_at_eos)
+from .reward import (RED_ALPHA_DEFAULT, RED_BETA_C_DEFAULT, RED_PROTOCOL,
+                     RETIRED_RLOO_ADVANTAGE_RULE, RLOO_ADVANTAGE_RULE, group_sigma,
+                     red_final_reward, red_kl_reward, rloo_baseline, rloo_red_credit,
+                     sequence_returns, sequence_reward_at_eos)
 from .rollout import select_training_rollout, validate_response_termination
 from .rm import LastTokenReward, build_rm_batch, score_prefixes
 from .tokens import check_tokenizer_identity, load_actor_tokenizer, shared_output_mask
@@ -108,6 +109,17 @@ class TrainerConfig:
     gradient_checkpointing: bool = True
     # --- RED, paper constants -------------------------------------------------
     beta_c: float = RED_BETA_C_DEFAULT
+    # R4's weight on the redistributed term.  A decision the paper does not make
+    # (it never defines the advantage function), so it is stamped per row and per
+    # manifest next to the advantage rule rather than left to the default alone.
+    red_alpha: float = RED_ALPHA_DEFAULT
+    # Optional pin on the advantage rule the config was written for.  Empty means
+    # "whatever the code implements".  A config naming a *different* rule is
+    # refused rather than reinterpreted: red250.json was written for the retired
+    # R3, and without this pin re-running it would silently produce an R4 run whose
+    # own config still describes R3, which is exactly the mislabelling the stamps
+    # exist to prevent.  The code cannot honour a retired rule, so it says so.
+    red_advantage_rule: str = ""
     # --- length reward, mirrored from the project ----------------------------
     length_threshold_short: int = 8
     length_threshold_long: int = 1024
@@ -154,6 +166,20 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be positive")
         if not math.isfinite(c.beta) or c.beta < 0:
             raise ValueError("beta must be finite and nonnegative")
+        # Zero is allowed and meaningful: it drops RED's redistribution and leaves
+        # plain RLOO, which is the ablation the arm's whole claim rests on.
+        if not math.isfinite(c.red_alpha) or c.red_alpha < 0:
+            raise ValueError("red_alpha must be finite and nonnegative")
+        if c.red_advantage_rule and c.red_advantage_rule != RLOO_ADVANTAGE_RULE:
+            if c.red_advantage_rule == RETIRED_RLOO_ADVANTAGE_RULE:
+                raise ValueError(
+                    f"This config pins advantage rule {RETIRED_RLOO_ADVANTAGE_RULE!r}, which is "
+                    f"retired: its estimator put a sequence-scale constant on every token and "
+                    f"collapsed an all-negative group to uniformly positive advantages. It was "
+                    f"the rule red250 ran under. Use a config pinning {RLOO_ADVANTAGE_RULE!r}.")
+            raise ValueError(
+                f"This config pins advantage rule {c.red_advantage_rule!r}, but the code "
+                f"implements {RLOO_ADVANTAGE_RULE!r}")
         if c.microbatch_responses != 1:
             raise ValueError("The physical reward/actor microbatch must be one")
         if c.optimizer_minibatch_responses % c.microbatch_responses:
@@ -701,8 +727,15 @@ class REDTrainer:
         returns = sequence_returns(shaped.to(self.actor_device), kl_reward, actor_mask,
                                    self.cfg.beta)
         baseline = rloo_baseline(returns, credit_group_ids)
-        credit = rloo_red_credit(final_reward, baseline, actor_mask)
-        del kl_reward, sequence_reward, final_reward, returns
+        # RLOO's own advantage.  Up to R3 this was computed and then thrown away --
+        # the rule subtracted the baseline off r^final instead -- which is what made
+        # the sequence contrast a per-token constant.  R4 needs it as the level.
+        sequence_advantage = returns - baseline
+        credit = rloo_red_credit(final_reward, sequence_advantage, actor_mask,
+                                 alpha=self.cfg.red_alpha)
+        # ``final_reward`` and ``baseline`` stay alive for the diagnostics and the
+        # credit dump; both are small next to the [B, T] tensors dropped here.
+        del kl_reward, sequence_reward, returns
         clock = phase("credit_sec", clock)
 
         self.actor.train()
@@ -807,7 +840,8 @@ class REDTrainer:
             "gpu_hours": (time.monotonic() - self.started) * (
                 2 + self.cfg.vllm_tensor_parallel_size) / 3600,
         }
-        metrics.update(self._red_diagnostics(credit, baseline, actor_mask))
+        metrics.update(self._red_diagnostics(credit, baseline, sequence_advantage,
+                                             final_reward, actor_mask))
         metrics.update(alignment)
         metrics.update(selection)
         metrics.update(self._adapter_identity)
@@ -829,14 +863,14 @@ class REDTrainer:
         if self.reward_device.type == "cuda":
             metrics["reward_peak_gb"] = torch.cuda.max_memory_allocated(self.reward_device) / 2 ** 30
         self._log(metrics)
-        self._dump_credit(credit, raw_rewards, token_rewards, baseline)
+        self._dump_credit(credit, raw_rewards, token_rewards, baseline, sequence_advantage)
         if self.cfg.checkpoint_interval and self.rollout_index % self.cfg.checkpoint_interval == 0:
             self.save_checkpoint(self.rollout_index)
         self.pusher.maybe_push(self.rollout_index, metrics)
         return metrics
 
     # ----------------------------------------------------------------- reports
-    def _red_diagnostics(self, credit, baseline, mask):
+    def _red_diagnostics(self, credit, baseline, sequence_advantage, final_reward, mask):
         """Observation only: nothing here feeds back into the update.
 
         RED's redistributed rewards are signed differences, so unlike the sibling
@@ -845,6 +879,12 @@ class REDTrainer:
         to one, which keeps ``credit_ess_ratio`` and the flat/one-hot fractions
         readable and comparable across arms; rows with no positive credit at all
         fall back to a uniform share instead of dividing by zero.
+
+        ``credit.direction`` is the *centred* redistributed term under R4, so the
+        ``red_token_reward_*`` block reads ``final_reward`` instead: those names
+        describe Eq. (8)'s per-token reward, and letting them silently come to
+        describe the centred direction would break every cross-run comparison
+        against the retired rule.
         """
         number = mask.sum(-1).float().clamp_min(1)
         weight = credit.weight.masked_fill(~mask, 0)
@@ -854,29 +894,39 @@ class REDTrainer:
         # ESS/T = 1/(T * sum p^2): 1 is flat (inert), 1/T is one-hot.  Same
         # direction as the VPO arms' credit ESS, not the inverse.
         ess = 1.0 / (share.square().sum(-1) * number).clamp_min(1e-12)
-        valid_reward = credit.direction[mask]
+        valid_reward = final_reward.float()[mask]
         valid_advantage = credit.advantage[mask]
+        direction = credit.direction[mask]
         quantiles = torch.quantile(valid_reward.float(),
                                    torch.tensor([.01, .5, .99], device=valid_reward.device))
-        # The token-varying part of the credit: the within-response spread of
-        # r^final, relative to the sequence scale the leave-one-out baseline sets.
-        # This is the analogue of the sibling arm's varying-bonus ratio.
-        row_mean = (credit.direction.masked_fill(~mask, 0).sum(-1, keepdim=True) / number[:, None])
-        varying = (credit.direction - row_mean)[mask]
-        baseline_scale = baseline.abs().mean().clamp_min(torch.finfo(torch.float32).tiny)
+        tiny = torch.finfo(torch.float32).tiny
+        baseline_scale = baseline.abs().mean().clamp_min(tiny)
+        # The token-varying part of the credit, relative to the sequence scale the
+        # leave-one-out baseline sets.  The analogue of the sibling arm's
+        # varying-bonus ratio, and of P2T's ``red_bonus_over_advantage``: under R4
+        # the direction is centred by construction, so this is the whole token term.
+        advantage_scale = sequence_advantage.abs().mean().clamp_min(tiny)
         # How often the redistribution flips a token's update direction relative
-        # to the baseline alone -- i.e. how far this arm's gradient is from plain
-        # RLOO's, which is the quantity the whole experiment turns on.
-        baseline_only = (-baseline[:, None].expand_as(mask))[mask]
-        nonzero = baseline_only != 0
-        flip = (torch.sign(valid_advantage[nonzero]) != torch.sign(baseline_only[nonzero]))
+        # to RLOO's sequence advantage alone -- i.e. how far this arm's gradient is
+        # from plain RLOO's, which is the quantity the whole experiment turns on.
+        # Read against ``sequence_advantage``, not R3's ``-b_i``: under R3 this sat
+        # at 0.0000 for the whole negative-reward phase, and that flat zero *was*
+        # the failure, so the health check now treats it as one.
+        sequence_only = sequence_advantage[:, None].expand_as(mask)[mask]
+        nonzero = sequence_only != 0
+        flip = (torch.sign(valid_advantage[nonzero]) != torch.sign(sequence_only[nonzero]))
         positive = valid_reward.clamp_min(0).sum()
         mass = valid_reward.abs().sum().clamp_min(1e-12)
+        # The share of tokens pushed *up*.  A sequence-contrast estimator keeps this
+        # near a half; a rule whose advantage has collapsed onto a single signed
+        # constant drives it to 0 or 1, and 1.0 is what red250 reached.
+        positive_advantage = (valid_advantage > 0).float().mean()
         return {
             "red_beta_c": self.cfg.beta_c,
             # The KL coefficient also rides inside the reward (Eq. 8), so it is a
             # method constant and is stamped per row like beta_c.
             "red_beta": self.cfg.beta,
+            "red_alpha": self.cfg.red_alpha,
             "red_protocol": RED_PROTOCOL,
             "red_advantage_rule": RLOO_ADVANTAGE_RULE,
             "red_token_reward_mean": float(valid_reward.mean()),
@@ -889,8 +939,12 @@ class REDTrainer:
             "red_share_max_mean": float(share.amax(-1).mean()),
             "red_flat_response_fraction": float(flat),
             "red_onehot_response_fraction": float(onehot),
-            "red_varying_over_baseline": float(varying.abs().mean() / baseline_scale),
+            "red_varying_over_baseline": float(direction.abs().mean() / baseline_scale),
+            "red_bonus_over_advantage": float(direction.abs().mean() / advantage_scale),
+            "red_positive_advantage_fraction": float(positive_advantage),
             "red_advantage_flip_fraction": float(flip.float().mean()) if nonzero.any() else 0.0,
+            "rloo_sequence_advantage_mean": float(sequence_advantage.mean()),
+            "rloo_sequence_advantage_abs_mean": float(sequence_advantage.abs().mean()),
             # VPO-parity names so the project's existing analysis keeps working.
             "credit_w_mean": float(weight[mask].mean()),
             "credit_w_std": float(weight[mask].std(unbiased=False)),
@@ -898,20 +952,22 @@ class REDTrainer:
             "credit_ess_ratio": float(ess.mean()),
         }
 
-    def _dump_credit(self, credit, raw_rewards, token_rewards, baseline):
+    def _dump_credit(self, credit, raw_rewards, token_rewards, baseline, sequence_advantage):
         # A small, per-step artifact: the redistributed token reward, the
-        # leave-one-out baseline and the final advantage behind every response
-        # token.  ``d``/``advantage`` keep the sibling arms' field names so the
-        # same readers work; ``i`` has no RED counterpart and is omitted rather
-        # than filled with zeros that would read as real attribution.
+        # leave-one-out baseline, RLOO's sequence advantage and the final advantage
+        # behind every response token.  ``d``/``advantage`` keep the sibling arms'
+        # field names so the same readers work; ``i`` has no RED counterpart and is
+        # omitted rather than filled with zeros that would read as real attribution.
         torch.save({"w": credit.weight.half().cpu(),
                     "d": credit.direction.half().cpu(),
                     "advantage": credit.advantage.half().cpu(),
                     "raw_reward": raw_rewards.float().cpu(),
                     "token_reward": token_rewards.float().cpu(),
                     "baseline": baseline.float().cpu(),
+                    "sequence_advantage": sequence_advantage.float().cpu(),
                     "protocol": RED_PROTOCOL,
                     "advantage_rule": RLOO_ADVANTAGE_RULE,
+                    "alpha": self.cfg.red_alpha,
                     "beta_c": self.cfg.beta_c},
                    self.output_dir / f"rollout-{self.rollout_index}-credit.pt")
 

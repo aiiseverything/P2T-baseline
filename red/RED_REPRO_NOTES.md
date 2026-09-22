@@ -41,11 +41,14 @@ order of magnitude below PPO-RED on Nectar.
 | §3.3 (2) | potential-based shaping preserves the optimal policy | §2.6 |
 | RLOO §2.3 | `1/k sum_i [R_i − 1/(k−1) sum_{j≠i} R_j] ∇log pi` | `reward.rloo_baseline` |
 | RLOO Eq. (11) | `L^{k=2} = (R(y⁺)−R(y⁻))/2 · (−log pi(y⁺) + log pi(y⁻))` | `loss.rloo_policy_loss` |
-| **R3** (this arm) | `A_{i,t} = r^final_{i,t} − b_i` | `reward.rloo_red_credit` |
+| **R4** (this arm) | `A_{i,t} = A_seq_i + alpha·(r^final_{i,t} − mean_t r^final_{i,t})` | `reward.rloo_red_credit` |
+| ~~R3~~ (retired) | `A_{i,t} = r^final_{i,t} − b_i` | was `reward.rloo_red_credit`; see §2.2 |
 
-Constants as configured in `configs/red250.json`: `beta_c = 1.0` (the paper's
+Constants as configured in `configs/red250b.json`: `beta_c = 1.0` (the paper's
 default; Table 7 uses 1 everywhere except LLaMA3 on TL;DR, which uses 0.5),
-`beta = 0.03`, `k = 8` (`group_size`).
+`beta = 0.03`, `k = 8` (`group_size`), `red_alpha = 1.0`. `configs/red250.json`
+is the first attempt's config and pins the retired R3, so the trainer refuses it
+rather than reinterpreting it.
 
 Two of those are deviations from the paper's own numbers and are stated here
 rather than left to be inferred:
@@ -135,7 +138,8 @@ mask, but it departs from RLOO's baseline definition, and token index `t` of one
 response has no semantic relation to token index `t` of another, so the baseline
 becomes noise. Rejected as unfaithful to RLOO without being more faithful to RED.
 
-**(R3, chosen) Scalar sequence baseline subtracted per token.**
+**(R3, chosen for `red250` and then retired — see the subsection below) Scalar
+sequence baseline subtracted per token.**
 
 ```
 b_i    = 1/(k−1) * sum_{j != i} R_j          (RLOO's own baseline, unchanged)
@@ -182,8 +186,95 @@ Both properties are inherited from the project's reduction, which the sibling ar
 use as well, and both are one-line changes if strict RLOO is wanted (drop the
 `/ mask.sum(-1)` in `loss.rloo_policy_loss`, and pass the raw reward to
 `reward.sequence_returns`). They are kept because this arm's purpose is to be
-comparable with its siblings, and `test_r3_does_differ_from_plain_rloo` pins that
+comparable with its siblings, and `test_r4_does_differ_from_plain_rloo` pins that
 it is still not plain RLOO.
+
+#### R3 is retired (2026-09-22)
+
+The paragraph above identifies the length half of R3's asymmetry and reads it as a
+reweighting. It misses the other half, which is a sign inversion, and the run
+`red250` hit it at rollout 26 and never recovered.
+
+`b_i` is a *sequence*-scale quantity subtracted from a *token*-scale reward. A
+single token's share of the redistributed return is `O(R/T)`, so once the group's
+rewards are negative the advantage is dominated by the constant `−b_i`, and that
+constant is positive. Measured on the run's own credit dumps
+(`runs/red250/rollout-N-credit.pt`):
+
+| rollout | mean `b_i` | mean token advantage | within-response `std(A)` / `|mean A|` | tokens with `A > 0` |
+|---|---|---|---|---|
+| 20 (healthy) | +0.85 | −0.83 | 1.98 | 0.465 |
+| 26 | −15.67 | **+15.66** | **0.08** | **1.000** |
+| 40 | −14.48 | +14.48 | 0.09 | 0.998 |
+
+`|mean A|` equals `|b_i|` to two decimals: RED's redistribution had stopped
+contributing anything to the update. The estimator had degenerated into RLOO's
+baseline applied T times per response, i.e. "raise the probability of every token
+you sampled", which is precisely the entropy collapse the run then showed. Two
+independent readings confirm it:
+
+* `red_advantage_flip_fraction` — the arm's own measure of how far its gradient is
+  from plain RLOO's — was **0.0000** from rollout 26 through rollout 50. The
+  metric was reporting the failure for 40 rollouts before the process died.
+* The length channel opened the other way at the same time: at rollout 40,
+  `corr(len, sum_t r~) = −0.294` (longer responses scored worse) against
+  `corr(len, mean_t A) = +0.281` (longer responses were rewarded more), because
+  the loss divides the credit by `T_i` and R3 did not divide the baseline.
+
+What followed: mean response length 451 → 1823 tokens, 685 truncations, raw reward
+0.48 → −9.17, then a collapse to ~2-token responses, `grad_norm` 104, `kl_to_init`
+6.15, and a hard crash at rollout 68 (§9). The sibling P2T arm, on the same data,
+reward model, initial adapter and length window, ran 250 rollouts with 0 resamples,
+10 truncations and a final reward of **+11.04** — so the difference is the credit
+rule, not the environment.
+
+**R4** replaces it:
+
+```
+A_seq_i          = returns_i − baseline_i        (RLOO's own leave-one-out advantage)
+direction_{i,t}  = alpha · ( r^final_{i,t} − mean_{t'} r^final_{i,t'} )
+A_{i,t}          = A_seq_i + direction_{i,t}
+```
+
+The sequence contrast carries the level, at full strength and unnormalised, and
+RED's redistribution decides only *which tokens within a response* receive it. The
+retired rule's own rejected alternative (R2, above) is what forces the shape: RLOO
+applied to RED's reward collapses back to plain RLOO, so the redistribution must
+enter per-token or not at all, and the only way to enter per-token without
+re-introducing a sequence-scale constant is to centre it.
+
+Properties, all pinned by tests in `tests/red/test_rloo_advantage.py`:
+
+* `advantage == sequence_advantage + direction` — the invariant the sibling arms
+  keep and R3 had inverted.
+* the valid-token mean of `direction` is zero (to float32 rounding), so the
+  valid-token mean of `A` is exactly `A_seq`. No response-level level leaks into
+  the token term, so there is nothing for the length to scale.
+* `alpha = 0` reproduces plain RLOO exactly, which is the ablation this arm's
+  claim rests on.
+
+`red_alpha = 1.0`, chosen a priori rather than tuned: the paper specifies no
+advantage function at all (§2.3), so equal weight for the two terms is the only
+defensible default. Measured on the dumps, the centred token term has
+`std ≈ 1.4–2.0` against `|A_seq| ≈ 2.3–2.8`, so one puts them within a factor of
+~1.5 — the order the sibling arm runs at (`p2t_bonus_over_advantage` ≈ 3.3 with
+`alpha = 0.1`, its token term being reward-scale rather than difference-scale).
+`red_bonus_over_advantage` is now reported so the ratio is visible rather than
+assumed.
+
+Replaying R4 over `red250`'s dumps (`A_seq` proxied by `raw − LOO mean`, since
+those dumps predate the `sequence_advantage` field):
+
+| rollout | tokens with `A > 0`: R3 → R4 | `|mean A|`: R3 → R4 | `corr(len, mean_t A)`: R3 → R4 |
+|---|---|---|---|
+| 26 | 1.000 → 0.505 | 15.66 → 1.79 | −0.065 → −0.049 |
+| 40 | 0.998 → 0.503 | 14.48 → 2.92 | +0.282 → −0.133 |
+
+The advantage scale no longer tracks the group's reward level, and the positive
+length coupling is gone. The residual negative correlation at a healthy rollout is
+the signal working: long responses were scored worse by the reward model, so they
+now receive a negative sequence advantage instead of having it washed out by a
+constant.
 
 ### 2.3 Algorithm 1's PPO ratio is written with the wrong denominator
 
@@ -196,6 +287,12 @@ This arm does not use PPO, so the contradiction does not bite here; it is record
 because the PPO variant would have to resolve it, and the pseudo-code does not.
 The reading implemented elsewhere in the project (the P2T arm) is that this is a
 typo.
+
+This is not the only thing the PPO variant would have to resolve by hand — §5 now
+lists the critic's architecture, the optimiser, the inner-epoch count, the target
+values and the entropy coefficient as equally open. That list is why §2.2's
+advantage rule is this arm's choice rather than a departure from a specification:
+the paper's only specified training recipe does not specify enough to implement.
 
 ### 2.4 Appendix Eq. (11) weights the KL by the token probability
 
@@ -400,7 +497,52 @@ arm's gradient is from plain RLOO's, which is the quantity §2.6 turns on.
 
 * **PPO.** The paper's headline configuration, with GAE, a critic and clipping.
   This arm is RLOO by choice; §2.3 records what PPO would additionally have to
-  resolve.
+  resolve. A full re-read of the paper for the R4 work (2026-09-22) turned up
+  considerably more than §2.3 lists, and it is recorded here because it is the
+  reason §2.2's advantage rule had to be chosen by this arm rather than copied:
+  PPO is the paper's *only* specified training recipe, and it does not specify
+  enough to implement. Open, in the paper's own text:
+
+  - **The critic.** Algorithm 1's `Require:` line says "Initial critic model V_φ"
+    and nothing else — not the architecture, not the backbone, not what it is
+    initialised from. §5 of the paper says only that PPO needs "policy model,
+    reward model, critic model, and reference model", implying a separate model.
+    The one value-head description in the paper (§2.2, Figure 2) is about the
+    *reward* model, not the critic.
+  - **The optimiser.** Actor and critic learning rates, weight decays, warmups and
+    schedules are given separately (Table 7: actor 1e-5, critic 5e-6, critic weight
+    decay 0.0), which implies two optimisers; the paper never names one, and
+    "Adam" appears nowhere in the text.
+  - **The PPO ratio's denominator.** Algorithm 1 step 13 writes
+    `π_θ(a|s)/π_ref(a|s)` in both the ratio and the clip. `π_old` is never defined
+    or mentioned anywhere in the paper, and no step stores the behaviour policy's
+    log-probabilities. Implemented literally this is not PPO: it is a trust region
+    around the SFT model layered on top of the KL penalty in Eq. (8), which already
+    anchors to the same reference.
+  - **Entropy bonus: absent.** Zero occurrences of "entropy" in 30 pages, and no
+    row for a coefficient in Table 7.
+  - **PPO inner epochs and minibatch size: absent.** Table 7's "total epochs 3" is
+    the outer loop; there is no inner-epoch count and no minibatch size.
+  - **Advantage normalisation: absent, not merely unspecified.** No whitening, no
+    reward standardisation, no running baseline is mentioned anywhere.
+  - **The target `V′` is never defined.** Algorithm 1 step 12 says only "compute
+    target values {V′} for each y_i with V_φ", and step 15 is an unweighted MSE
+    against it. Whether `V′` is the λ-return, the Monte-Carlo return, or GAE is not
+    stated, and there is no value-loss coefficient, no value clipping and no reward
+    clipping.
+  - **Eq. (4)'s KL vs Figure 4's.** Eq. (4) defines the full per-token divergence
+    `KL(π_θ(a_t|s_t) ‖ π_ref(a_t|s_t))`; Figure 4 computes the single-sample
+    `log_probs − ref_log_probs`. §2.5 already records which one this arm follows;
+    the paper never reconciles them, and the choice changes the reward's magnitude.
+  - **Two more internal contradictions.** Figure 4 zeroes `reward_token[0]` while
+    Eq. (6) at `t=0` gives `R_φ(x,y_≤0) − R_φ(x,∅)`; and Table 7's
+    `reward shaping α` is 1 while §4.4 says "α is a scaling factor set to -1 in our
+    experiments".
+
+  The relevance to §2.2 is direct: "the paper is silent about the RLOO baseline" is
+  not one loose end among many, it is the *whole* estimator. Cutting the PPO route
+  would have meant making all of the decisions above by hand, which is a strictly
+  worse fidelity position than choosing the one rule §2.2 needs and stamping it.
 * **The harmfulness/helpfulness two-model setup.** The paper applies
   redistribution separately to a reward model and a cost model and combines them
   (`r~agg = 1/2 (r~_t + alpha·c~_t)`, `alpha = −1`). This arm runs the single
@@ -444,7 +586,7 @@ convention (`atol=0, rtol=0` for pure ports):
 | reward-scale calibration | `vpo_rm.length_reward.calibrate_reward_scale` |
 | group spread diagnostic | `vpo_rm.core.group_advantages` (scale output) |
 
-Mirrored training protocol, from `configs/red250.json` (identical to the sibling
+Mirrored training protocol, from `configs/red250b.json` (identical to the sibling
 arm's `formal250.json` except for the credit assignment): actor `Qwen3-14B-Base`,
 reward model `Skywork-Reward-V2-Qwen3-8B`, `init_adapter models/sft-p2t`, group
 size 8, 8 prompts per rollout, 250 rollouts, actor lr 5e-5, weight decay 0.01,
@@ -485,7 +627,7 @@ its disposition; nothing in the table was waived silently.
 | **An entirely unmappable response aborted the run.** `score_prefixes` masked the redistribution with `response_mask & positions.ge(0)`. An immediate-stop response is a single special token, and specials are never mapped, so that intersection emptied the row — and `_binary_mask` requires at least one valid token per row. Reachable and reachable *by design*: the trainer flags such a response degenerate and floors its shaped reward, so it trains on it deliberately, and the rollout-0 gate cannot see it because `rm_unmapped_content_fraction` excludes special tokens. | **Fixed.** The mask is now the actor response mask alone. The intersection was redundant as well as harmful: `prefix_boundaries` gives unmapped positions `right == left`, so their difference is already exactly zero. Two regression tests use the immediate-stop row directly, and one checks it does not take its batch neighbours down with it. |
 | `left.clamp_min(0)` would drop the dynamic-initialisation term if the first mapped token sat at reward-model position 0 (the first boundary should be `-1`, which is not a valid index). | **Recorded, not reachable.** The canonical chat template always precedes the response, so a response's bytes never start at offset 0. Left as is: clamping keeps the gather in range, and the alternative is an out-of-range index. |
 | `prefix_boundaries` uses `cummax` over `mapped`, which means "the last mapped position at or before `t`" only while `mapped` is non-decreasing. It is exported, so a caller could pass a non-monotone row. | **Recorded.** In the only call path the precondition is enforced first and does hold: `rm.score_prefixes` calls `check_response_tokens` (strictly increasing over valid positions) before `prefix_boundaries`. With a non-monotone row the *sum* still telescopes but individual tokens are misattributed, i.e. it fails silently — hence recorded rather than dismissed. |
-| Tokens the reward model never saw receive a **non-zero advantage** (their redistributed reward is zero, but the baseline and the KL term are not), which reads as contradicting the "contributes exactly zero" language in `mapping.py` and `prefix_boundaries`. | **Recorded, faithful.** Under R3 the advantage is `r^final − b_i`, so an unmapped token carries `−b_i − beta*KL`. Only the *redistribution* is zero there. `rloo_red_credit`'s docstring now says so explicitly, since the shorter phrasing invited the wrong reading. |
+| Tokens the reward model never saw receive a **non-zero advantage** (their redistributed reward is zero, but the sequence advantage and the KL term are not), which reads as contradicting the "contributes exactly zero" language in `mapping.py` and `prefix_boundaries`. | **Recorded, faithful.** Under R4 the advantage is `A_seq_i + alpha*(0 − mean_t r^final)`, so an unmapped token shares its response's sequence advantage instead of the retired rule's constant. Only the *redistribution* is zero there. `rloo_red_credit`'s docstring says so explicitly, since the shorter phrasing invited the wrong reading. |
 | Device guards live in `rloo_baseline` and `rloo_red_credit` only; `credit_share`, `red_final_reward`, `sequence_returns`, `sequence_reward_at_eos` and `red_kl_reward` would still fail with a raw torch device error rather than a named diagnostic. | **Recorded.** The two guarded functions are the ones that touch two different roles' tensors; the others take tensors from one side. Adding five more guards would be noise for no additional protection. |
 | `rloo_baseline`'s docstring calls the leave-one-out mean "exact"; it is float32-exact. Grouped in float32 and differenced as `sum − r`, cancellation grows with the reward magnitude (measured deviation vs float64 ≤ 3e-7 on `randn(8)*3`). | **Recorded.** The reward model's own output is already lower precision, and the sibling arm standardises in the same way. |
 
@@ -517,3 +659,71 @@ artifacts. Consequences observed in this repository:
 The staging behaviour is worth narrowing to the run's own paths before the next
 arm runs. Removing the PDF from history is a force-push against a published
 branch and is therefore a decision for the repository owner, not for this file.
+
+## 9. Run record
+
+### `red250` — the R3 run, collapsed and crashed (2026-09-21 20:01 → 2026-09-22 04:00)
+
+67 rollouts completed, then a fatal `RuntimeError` during rollout 68. The artifacts
+are kept on disk as the evidence for §2.2: `runs/red250/` (68 rollout artifacts,
+checkpoints at 40 and 60, `train.log` with the traceback), `reports/red250/`
+(`metrics.jsonl`, `health.log`, `summary.json`, `reward.png`). The config that
+produced it, `configs/red250.json`, pins R3 and is refused by the trainer rather
+than reused.
+
+**Timeline**, from `reports/red250/metrics.jsonl`:
+
+| rollouts | mean length | raw reward | what changed |
+|---|---|---|---|
+| 1–19 | 178 → 519 | +2 … +7 | ordinary: token-level credit near zero, `flip_fraction` 0.05–0.08 |
+| 20–26 | 582 → 1753 | +2 → −6.8 | length runs to the 2048 cap, truncations 0 → 43/64, `flip_fraction` → **0.0000** |
+| 26–50 | 345 → 1710 | −4 … −10.8 | the all-positive-advantage regime of §2.2; `kl_to_init` 0.09 |
+| 50–67 | 345 → 2.1 | −6.5 … −10.6 | entropy collapse, `grad_norm` 3.9 → 104, `kl_to_init` → 6.15, degenerate rows appear |
+| 68 | — | — | fatal `RuntimeError` in `rollout._pack` |
+
+**The crash** is a bug in this package, not in the paper, and it is fixed. When a
+rollout contains a prompt group whose responses are all degenerate, the selector
+resamples that group; the retry is a *separately generated* batch, so its response
+block has its own padded width. `_pack` sliced a piece's response block by the
+merged width while building a `keep` mask at that same merged width, so a piece
+whose own block was narrower produced
+
+```
+RuntimeError: The size of tensor a (2) must match the size of tensor b (3) at non-singleton dimension 1
+```
+
+Rollout 68 was the first in the run where the resample path met two different block
+widths — the collapsed policy's ~2-token responses are a 2-column block, the retry
+was 3. `_pack` now clamps every slice to the piece's own block and zero-pads the
+tail, which is outside every row's mask and so already excluded by the loss.
+`red/rollout.py` and `p2t/rollout.py` are byte-identical apart from one docstring
+word, so **the sibling P2T arm carried the same latent bug**; it never fired there
+only because `p2t250` resampled no group in 250 rollouts. Both arms now have a
+regression test (`tests/red/test_rollout.py`, `tests/p2t/test_rollout.py`) that
+constructs the narrow-piece merge and fails against the old `_pack`.
+
+**Why nothing was recovered from it.** `checkpoint_interval` was 20 with
+`keep_checkpoints: 2`, so the surviving checkpoints were 40 and 60 — both already
+inside the bad regime (rollout 40: reward −8.6, length 1059; rollout 60: length
+7.2, `kl_to_init` 1.5). The last healthy state was around rollout 19–20 and was
+never written. `configs/red250b.json` keeps the sibling's 20/2 cadence anyway,
+because `tests/red/test_trainer.py` pins every shared training parameter against
+`formal250.json`; the protection against a repeat is the health gate below, which
+also caps how much recoverable progress a stop can cost.
+
+**The health check now fails fast where it used to take notes.** `red250`'s
+`health.log` shows the checker reporting `PROBLEM: entropy falling`, `PROBLEM: KL
+to init is 5.19` and `PROBLEM: response length falling` from rollout 62 onward,
+but `red_advantage_flip_fraction` — the earliest and most specific signature, flat
+at 0.0000 from rollout 26 — was a *note*, so nothing stopped. It is now a hard
+problem when it sits below 0.01 over a window, alongside two new checks:
+`red_positive_advantage_fraction` outside `(0.05, 0.95)` and `red_bonus_over_advantage`
+outside `(0.02, 50)`. `red/scripts/check_red_health.py --stop-on-problem --pidfile …`
+SIGTERMs the run when a problem is found, and `watch_red.sh` takes
+`stop-on-problem` as a third argument to enable it. It is off by default: killing a
+run is the launcher's call.
+
+**The sibling arm is the control.** P2T ran the same data, the same reward model,
+the same `models/sft-p2t` initial adapter and the same length window for 250
+rollouts: 0 resampled groups, 10 truncations, minimum mean length 150, raw reward
+0.55 → **+11.04**. The environment was not the problem.

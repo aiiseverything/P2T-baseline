@@ -7,6 +7,7 @@ they are exercised here against synthetic reward-model rows.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -18,7 +19,8 @@ import torch
 from torch import nn
 
 from red.autopush import AutoPusher
-from red.reward import RED_BETA_C_DEFAULT
+from red.reward import (RED_ALPHA_DEFAULT, RED_BETA_C_DEFAULT,
+                        RETIRED_RLOO_ADVANTAGE_RULE, RLOO_ADVANTAGE_RULE)
 from red.rm import LastTokenReward
 from red.trainer import REDTrainer, TrainerConfig, load_config
 
@@ -61,7 +63,7 @@ def test_the_smoke_config_is_a_two_step_copy_of_the_formal_one():
     """
     root = Path(__file__).resolve().parents[2]
     smoke = load_config(root / "configs" / "red-smoke2.json")
-    formal = load_config(root / "configs" / "red250.json")
+    formal = load_config(root / "configs" / "red250b.json")
     assert smoke.rollout_iterations == 2
     assert smoke.push_every == 0, "a two-step run has nothing worth publishing"
     assert smoke.output_dir != formal.output_dir
@@ -96,7 +98,10 @@ def test_shipped_config_is_valid_and_matches_the_sibling_arms():
     is read as raw JSON rather than through this package's loader.
     """
     root = Path(__file__).resolve().parents[2]
-    config = load_config(root / "configs" / "red250.json")
+    # red250b, not red250: the first attempt's config pins the retired advantage
+    # rule and is deliberately unloadable, which
+    # ``test_the_retired_config_cannot_be_rerun`` asserts.
+    config = load_config(root / "configs" / "red250b.json").resolved()
     sibling = json.loads((root / "configs" / "formal250.json").read_text())
     assert config.beta_c == 1.0
     assert config.group_size == 8
@@ -119,6 +124,39 @@ def test_shipped_config_is_valid_and_matches_the_sibling_arms():
                    "advantage_std_floor_fraction", "checkpoint_interval",
                    "keep_checkpoints", "lora_r", "lora_alpha"):
         assert getattr(config, shared) == sibling[shared], f"{shared} drifted from the sibling arm"
+
+
+def test_the_shipped_config_pins_the_rule_the_code_implements():
+    """A config that does not name its rule can be waved through by a future change."""
+    root = Path(__file__).resolve().parents[2]
+    config = load_config(root / "configs" / "red250b.json")
+    assert config.red_advantage_rule == RLOO_ADVANTAGE_RULE
+    assert config.red_alpha == RED_ALPHA_DEFAULT
+
+
+def test_the_retired_config_cannot_be_rerun():
+    """red250.json is the record of the failed run, not a launchable config.
+
+    Without the pin it would load, default to alpha 1.0, and produce an R4 run
+    whose own config still describes R3 -- a mislabelled artifact rather than a
+    refusal, which is the failure the protocol stamps exist to prevent.
+    """
+    root = Path(__file__).resolve().parents[2]
+    config = load_config(root / "configs" / "red250.json")
+    assert config.red_advantage_rule == RETIRED_RLOO_ADVANTAGE_RULE
+    with pytest.raises(ValueError, match="retired"):
+        config.resolved()
+
+
+def test_a_config_pinning_an_unknown_rule_is_refused(tmp_path):
+    config = TrainerConfig(red_advantage_rule="some_other_rule")
+    with pytest.raises(ValueError, match="some_other_rule"):
+        config.resolved()
+
+
+def test_a_config_may_decline_to_pin_a_rule():
+    """Empty means "whatever the code implements", which the smoke relies on."""
+    assert TrainerConfig().resolved().red_advantage_rule == ""
 
 
 # --------------------------------------------------------------- tiny models
@@ -296,16 +334,59 @@ def test_train_rollout_runs_one_full_step_and_reports_diagnostics(tmp_path, monk
     assert (trainer.report_dir / "metrics.jsonl").is_file()
 
 
+def _checker():
+    """The health checker, loaded as the script it is rather than as a module."""
+    path = Path(__file__).resolve().parents[2] / "red" / "scripts" / "check_red_health.py"
+    spec = importlib.util.spec_from_file_location("check_red_health_vocabulary", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_metrics_row_satisfies_every_key_the_health_checker_reads(tmp_path, monkeypatch):
+    """The trainer and the checker must agree on the vocabulary.
+
+    The checker reads a row's keys by name, so a metric that is renamed or dropped
+    in the trainer makes the checker report a *shared-metric* problem instead of
+    measuring anything -- a false alarm on a healthy run, or worse, a missing
+    signal.  The new keys this rule adds are the ones the collapse would show up
+    in, so the link is asserted rather than assumed.
+    """
+    trainer, fake_batch, fake_score = _stub_trainer(tmp_path)
+    _wire(monkeypatch, trainer, fake_batch, fake_score)
+    metrics = trainer.train_rollout(["p"])
+
+    checker = _checker()
+    for key in (*checker.SHARED, *checker.FINITE):
+        assert key in metrics, f"the checker reads {key}, which the trainer no longer emits"
+    for key in ("red_alpha", "red_bonus_over_advantage", "red_positive_advantage_fraction",
+                "rloo_sequence_advantage_mean", "rloo_sequence_advantage_abs_mean"):
+        assert key in metrics, f"{key} missing"
+        assert math.isfinite(metrics[key]), f"{key} is not finite"
+    for bounded in ("red_positive_advantage_fraction", "red_bonus_over_advantage"):
+        assert 0.0 <= metrics[bounded] <= 1.0, f"{bounded} out of range"
+    assert metrics["red_alpha"] == RED_ALPHA_DEFAULT
+    assert metrics["red_advantage_rule"] == RLOO_ADVANTAGE_RULE
+
+
 def test_credit_dump_carries_the_red_fields(tmp_path, monkeypatch):
     trainer, fake_batch, fake_score = _stub_trainer(tmp_path)
     _wire(monkeypatch, trainer, fake_batch, fake_score)
     trainer.train_rollout(["p"])
     payload = torch.load(trainer.output_dir / "rollout-1-credit.pt", weights_only=False)
     for key in ("w", "d", "advantage", "raw_reward", "token_reward", "baseline",
-                "protocol", "advantage_rule", "beta_c"):
+                "sequence_advantage", "protocol", "advantage_rule", "alpha", "beta_c"):
         assert key in payload, f"{key} missing from the credit dump"
     assert payload["protocol"] == "prefix_difference_eq6"
-    assert payload["advantage_rule"] == "loo_scalar_baseline_r3"
+    assert payload["advantage_rule"] == RLOO_ADVANTAGE_RULE
+    # The retired rule must not be reachable through a stale import or a default.
+    assert payload["advantage_rule"] != RETIRED_RLOO_ADVANTAGE_RULE
+    assert payload["alpha"] == RED_ALPHA_DEFAULT
+    # The dumped advantage really is the dumped sequence advantage plus the dumped
+    # direction, so an offline reader can re-derive it rather than trust a label.
+    torch.testing.assert_close(payload["advantage"].float(),
+                              payload["sequence_advantage"][:, None] + payload["d"].float(),
+                              atol=1e-3, rtol=0)
     # The sibling arm's attribution field has no RED counterpart and must not be
     # filled with zeros, which would read as real attribution.
     assert "i" not in payload
