@@ -1,11 +1,11 @@
 {
-  "_comment": "Two-rollout smoke for the RED arm. Everything scientific is identical to red250.json -- same actor, same SFT adapter, same shared sigma0, same beta_c, same device plan -- so the smoke exercises the real code path rather than a reduced one. Only the run identity, the rollout count and autopush differ: push_every is 0 because a two-step run has nothing worth publishing, and the run writes to its own dirs so it can never mix into the formal run's metrics.jsonl. Run with: bash red/scripts/start_red.sh red-smoke2  (no RED_GPUS: absolute device ids, see red250.json's comment).",
-  "run_name": "red-smoke2",
+  "_comment": "Two-rollout smoke for the he20 arm. Everything scientific is identical to he20250.json -- same actor, same SFT adapter, same shared sigma0, same mask settings, same device plan -- so the smoke exercises the real code path rather than a reduced one. Only the run identity, the rollout count and autopush differ: push_every is 0 because a two-step run has nothing worth publishing, and the run writes to its own dirs so it can never mix into the formal run's metrics.jsonl. Run with: bash he20/scripts/start_he20.sh he20-smoke2  (or HE20_GPUS=0,1,2,3 for the device-plan check).",
+  "run_name": "he20-smoke2",
   "model_name": "models/Qwen3-14B-Base",
   "reward_model_name": "models/Skywork-Reward-V2-Qwen3-8B",
   "init_adapter": "models/sft-p2t",
-  "output_dir": "runs/red-smoke2",
-  "report_dir": "reports/red-smoke2",
+  "output_dir": "runs/he20-smoke2",
+  "report_dir": "reports/he20-smoke2",
   "actor_device": "cuda:0",
   "reward_device": "cuda:1",
   "vllm_gpus": [
@@ -13,7 +13,7 @@
     "3"
   ],
   "vllm_tensor_parallel_size": 2,
-  "vllm_gpu_memory_utilization": 0.9,
+  "vllm_gpu_memory_utilization": 0.85,
   "vllm_max_num_seqs": 32,
   "seed": 42,
   "generation_seed": 0,
@@ -33,7 +33,6 @@
   "max_grad_norm": 1.0,
   "clip_eps": 0.2,
   "beta": 0.03,
-  "beta_c": 1.0,
   "lora": true,
   "lora_r": 64,
   "lora_alpha": 128,
@@ -66,5 +65,7 @@
   "push_branch": "main",
   "push_local_branch": "p2t-baseline",
   "keep_adapters": 2,
-  "policy_head_dtype": "float32"
+  "policy_head_dtype": "float32",
+  "entropy_top_ratio": 0.2,
+  "entropy_top_rule": "threshold"
 }

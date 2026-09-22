@@ -727,3 +727,59 @@ run is the launcher's call.
 the same `models/sft-p2t` initial adapter and the same length window for 250
 rollouts: 0 resampled groups, 10 truncations, minimum mean length 150, raw reward
 0.55 → **+11.04**. The environment was not the problem.
+
+### `red250b` — the R4 run, stopped deliberately at step 23
+
+Config `configs/red250b.json`, the R4 credit rule, four cards (`tp=2`) instead of
+`red250`'s three (`tp=1`). Nothing else differs from `red250` in the credit path,
+so this run is the test of whether the R3 fix was sufficient.
+
+**It was not.** The R3 channel is closed — `red_positive_advantage_fraction` sits
+at 0.28–0.54 rather than collapsing onto 1.0, `red_advantage_flip_fraction` stays
+at 0.06–0.21 rather than 0.0000, `red_bonus_over_advantage` at 0.19–0.65. But the
+run reproduces `red250`'s **length** trajectory almost step for step, and the two
+runs are independent evidence for the same conclusion because they differ in the
+credit rule:
+
+| step | 18 | 19 | 20 | 21 | 22 | 23 |
+|---|---|---|---|---|---|---|
+| `red250b` mean tokens | 649 | 623 | 679 | 876 | 987 | **1116** |
+| `red250` mean tokens | 451 | 519 | 582 | 875 | 925 | **1048** |
+| `red250b` truncated /64 | 4 | 4 | 8 | 8 | 9 | **22** |
+| `red250` truncated /64 | 0 | 0 | 5 | 6 | 11 | **20** |
+| `red250b` raw reward | 4.26 | 7.64 | 3.42 | 6.87 | 3.10 | **−0.16** |
+| `red250` raw reward | 4.35 | 7.03 | 2.32 | 6.16 | 1.29 | **−0.38** |
+
+(`red250b` entropy ran 1.74 → 2.68 over the same steps, against `red250`'s
+1.35 → 2.47.) **Stopped at step 23** by decision, with the four cards released and
+`runs/red250b/` + `reports/red250b/` kept as the record. The run did not reach its
+endpoint, so this is the onset of the collapse rather than its full course — but
+the onset is what §2.2's second channel predicts, and the full course is already
+on record from `red250`.
+
+**The reading.** The two failure modes are independent. R3's all-positive
+advantage was a bug in *this arm's* estimator and R4 removed it; the length
+explosion is a property of RED's **prefix differencing at this reward scale**,
+untouched by that fix. The mechanism is the one in §2.2's tail analysis: the
+telescoping chain lands the response's final verdict on the last token, and the
+loss divides by `T`, so lengthening a response dilutes its punishment while every
+earlier token keeps whatever positive prefix drift it collected. A run that never
+truncated would eventually meet the verdict; this one truncates at the 2048 cap,
+so the negative is collected once, late, and divided by ~2000.
+
+### The health gate does not catch this mode (must be fixed before a re-run)
+
+`reports/red250b/health.log` reported **zero** problems across steps 13–23 while
+the run was visibly collapsing. Every trip-wire added in §2.2's retirement work is
+calibrated to the *R3* signature — flip fraction → 0, positive-advantage fraction
+→ 1, bonus/advantage in a band — and the shared checks in
+`scripts/check_run_health.py` look for length **falling**, entropy **falling**,
+truncation above 50%, and `kl_to_init` above 5. The length channel moves all of
+those the *other* way: length rising, entropy rising, truncation rising but still
+far below 50%. So `stop-on-problem` was armed and correctly did nothing.
+
+A re-run needs a trip-wire for the length channel specifically — truncation rate
+rising across a window, or mean response length doubling across one — and it
+should be added on the run that follows, not after watching another 40 steps of a
+predicted trajectory. The same gap applies to the sibling arms if a reward scale
+can drive them into length growth.
