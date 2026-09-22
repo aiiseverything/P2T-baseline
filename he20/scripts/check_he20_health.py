@@ -295,11 +295,27 @@ def main() -> int:
                             f"score the advantage is built on came from text the reward "
                             f"model never saw")
 
+    # The two thresholds here are this arm's own, NOT the sibling checker's.  This
+    # arm's ``rate`` returns the raw half-vs-half *shift* (line 105) where the shared
+    # checker it was copied from returns a per-rollout *rate*
+    # (``scripts/check_run_health.py:47``: ``shift / (len(values) - half)``).  At
+    # window=10 the same literal means 5x more here, and the string both checkers
+    # print says "tokens/rollout" for a quantity that is not one.  Inheriting the
+    # literals -20 / -0.02 therefore made this arm's two trend wires fire on 22 and
+    # 24 of p2t250's prefixes -- every one of them a false positive on the arm that
+    # finished all 250 rollouts at raw reward +11.0 (its healthy maxima were a
+    # length shift of -156.5 and an entropy shift of -0.217) -- and they are what
+    # SIGTERM'd he20250 at rollout 12 on a shift that cleared its window's own spread
+    # of 83.3 by 0.9 tokens while kl_to_init was 0.0256 and response_entropy was
+    # 1.018, above p2t250's 0.742.  The calibrated pair sits just past every value
+    # that healthy run produced and still fires on red250's genuine collapse (-238.7
+    # length, -0.564 entropy).  Local edit, kept visible and uncommitted, the same
+    # discipline as niuniu-ref/LOCAL-DEVIATION-L20.md.
     length = rate(rows, "mean_response_tokens", args.window)
-    if length is not None and length < -20:
+    if length is not None and length < -180:
         problems.append(f"response length falling {length:.0f} tokens/rollout")
     entropy = rate(rows, "response_entropy", args.window)
-    if entropy is not None and entropy < -0.02:
+    if entropy is not None and entropy < -0.30:
         problems.append(f"entropy falling {entropy:.4f} nats/rollout (collapse?)")
     if number(last.get("kl_to_init")) and last["kl_to_init"] > 5:
         problems.append(f"KL to init is {last['kl_to_init']:.2f}; the policy has drifted far")

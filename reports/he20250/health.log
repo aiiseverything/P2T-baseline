@@ -37,3 +37,17 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/steps/step-0009.p
 wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
 rollout 9: raw_reward 8.8702392578125, loss -0.00017105572624132037, grad_norm 1.6055659055709839, tokens 313.96875, mask kept 0.20000995695590973 of rho 0.2 (threshold 1.5951746702194214), entropy kept 2.2281386852264404 vs all 0.8485631346702576, protocol entropy_top_mask_eq6
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/steps/step-0010.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+rollout 10: raw_reward 6.552097320556641, loss -0.0050980912947125034, grad_norm 2.617034912109375, tokens 241.0, mask kept 0.2000129669904709 of rho 0.2 (threshold 1.9615198373794556), entropy kept 2.685290813446045 vs all 1.070947527885437, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/steps/step-0011.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+rollout 11: raw_reward 5.9689483642578125, loss 0.018455247272413544, grad_norm 2.1536014080047607, tokens 195.0625, mask kept 0.20001602172851562 of rho 0.2 (threshold 1.726966142654419), entropy kept 2.373262405395508 vs all 0.9414059519767761, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/steps/step-0012.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250/summary.json
+rollout 12: raw_reward 4.0985107421875, loss -0.062097545661004006, grad_norm 3.40838360786438, tokens 119.609375, mask kept 0.20000000298023224 of rho 0.2 (threshold 1.8280673027038574), entropy kept 2.577507972717285 vs all 1.0175408124923706, protocol entropy_top_mask_eq6
+  PROBLEM: response length falling -84 tokens/rollout
+  stop-on-problem: sent SIGTERM to pid 417946 for: response length falling -84 tokens/rollout
+=== train.pid is gone; watcher stopping 2026-09-22T16:42:50+08:00 ===
