@@ -536,3 +536,23 @@ wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0134.
 wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
 rollout 134: raw_reward 13.736328125, loss 0.003457248560152948, grad_norm 0.3911242187023163, tokens 762.0625, mask kept 0.20001229643821716 of rho 0.2 (threshold 1.3296955823898315), entropy kept 1.9597742557525635 vs all 0.6666834354400635, protocol entropy_top_mask_eq6
   ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0135.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+rollout 135: raw_reward 10.137680053710938, loss 0.0027307825803291053, grad_norm 0.6298907399177551, tokens 728.0, mask kept 0.20001287758350372 of rho 0.2 (threshold 1.4539713859558105), entropy kept 2.1825952529907227 vs all 0.7479628920555115, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0136.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+rollout 136: raw_reward 12.0263671875, loss 0.0034799933491740376, grad_norm 0.5371512770652771, tokens 581.28125, mask kept 0.20001612603664398 of rho 0.2 (threshold 1.1746551990509033), entropy kept 1.7943087816238403 vs all 0.5733287930488586, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0137.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+rollout 137: raw_reward 6.9460248947143555, loss 0.00411595958576072, grad_norm 0.6461473703384399, tokens 537.5, mask kept 0.20000000298023224 of rho 0.2 (threshold 1.1160869598388672), entropy kept 1.7075697183609009 vs all 0.5453583002090454, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0138.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+rollout 138: raw_reward 13.880859375, loss 0.0018103826441802084, grad_norm 0.5103270411491394, tokens 688.96875, mask kept 0.20016328990459442 of rho 0.2 (threshold 1.2383944988250732), entropy kept 1.9295982122421265 vs all 0.605562150478363, protocol entropy_top_mask_eq6
+  ok
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/steps/step-0139.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+wrote /home/ml-user/workdir/project-1/baseline/reports/he20250b/reward.png and /home/ml-user/workdir/project-1/baseline/reports/he20250b/summary.json
+rollout 139: raw_reward 12.02587890625, loss -0.035921975591918454, grad_norm 1.7540076971054077, tokens 624.484375, mask kept 0.20001500844955444 of rho 0.2 (threshold 1.3574837446212769), entropy kept 2.0491390228271484 vs all 0.6830814480781555, protocol entropy_top_mask_eq6
+  ok
